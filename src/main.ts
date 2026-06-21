@@ -72,6 +72,13 @@ interface ManifestEntry {
   tool: string;
 }
 
+interface ManagedMarker {
+  files?: string[];
+  name: string;
+  tool: string;
+  type: AgenticType;
+}
+
 interface ParsedArgs {
   force: boolean;
   global: boolean;
@@ -350,18 +357,38 @@ async function materialize(
 
   const sourcePath = resolveInside(libraryDir, entry.path);
   const destination = destinationPath(name, entry.type, scope, tool, toolPaths());
-  await ensureManagedDestination(destination);
-  await rm(destination, { force: true, recursive: true });
+  const managedFiles = await managedFileSet(destination);
+  const sourceFiles = await packageFiles(sourcePath);
+
+  for (const sourceFile of sourceFiles) {
+    const installedPath = join(destination, sourceFile.relativePath);
+    if ((await exists(installedPath)) && !managedFiles.has(sourceFile.relativePath)) {
+      throw new Error(
+        `Refusing to overwrite unmanaged destination file: ${installedPath}\n` +
+          "Remove it or move it aside, then retry.",
+      );
+    }
+  }
+
   await mkdir(destination, { recursive: true });
 
-  const sourceStat = await stat(sourcePath);
-  if (sourceStat.isDirectory()) {
-    await cp(sourcePath, destination, { recursive: true });
-  } else {
-    await cp(sourcePath, join(destination, basename(sourcePath)));
+  const sourceFileNames = new Set(sourceFiles.map((file) => file.relativePath));
+  for (const managedFile of managedFiles) {
+    if (!sourceFileNames.has(managedFile)) {
+      const installedPath = join(destination, managedFile);
+      await rm(installedPath, { force: true });
+      await removeEmptyParents(dirname(installedPath), destination);
+    }
+  }
+
+  for (const sourceFile of sourceFiles) {
+    const installedPath = join(destination, sourceFile.relativePath);
+    await mkdir(dirname(installedPath), { recursive: true });
+    await cp(sourceFile.path, installedPath);
   }
 
   await writeJson(join(destination, managedMarkerFile), {
+    files: sourceFiles.map((file) => file.relativePath).sort(),
     name,
     tool,
     type: entry.type,
@@ -375,19 +402,112 @@ async function removeMaterialized(
   tool: string,
 ): Promise<void> {
   const destination = destinationPath(name, type, scope, tool, toolPaths());
-  await rm(destination, { force: true, recursive: true });
+  await removeManagedDestination(destination);
 }
 
-async function ensureManagedDestination(destination: string): Promise<void> {
+async function managedFileSet(destination: string): Promise<Set<string>> {
   if (!(await exists(destination))) {
-    return;
+    return new Set();
   }
 
-  if (!(await exists(join(destination, managedMarkerFile)))) {
+  const markerPath = join(destination, managedMarkerFile);
+  if (!(await exists(markerPath))) {
     throw new Error(
       `Refusing to overwrite unmanaged destination: ${destination}\n` +
         "Remove it or move it aside, then retry.",
     );
+  }
+
+  const marker = JSON.parse(await readFile(markerPath, "utf8")) as ManagedMarker;
+  if (Array.isArray(marker.files)) {
+    return new Set(marker.files);
+  }
+
+  return new Set(await installedFiles(destination));
+}
+
+async function removeManagedDestination(destination: string): Promise<void> {
+  if (!(await exists(destination))) {
+    return;
+  }
+
+  const markerPath = join(destination, managedMarkerFile);
+  if (!(await exists(markerPath))) {
+    return;
+  }
+
+  for (const managedFile of await managedFileSet(destination)) {
+    const installedPath = join(destination, managedFile);
+    await rm(installedPath, { force: true });
+    await removeEmptyParents(dirname(installedPath), destination);
+  }
+
+  await rm(markerPath, { force: true });
+  await removeEmptyParents(destination, destination);
+}
+
+interface PackageFile {
+  path: string;
+  relativePath: string;
+}
+
+async function packageFiles(sourcePath: string): Promise<PackageFile[]> {
+  const sourceStat = await stat(sourcePath);
+  if (!sourceStat.isDirectory()) {
+    return [{ path: sourcePath, relativePath: basename(sourcePath) }];
+  }
+
+  return directoryFiles(sourcePath, sourcePath);
+}
+
+async function installedFiles(destination: string): Promise<string[]> {
+  return (await directoryFiles(destination, destination))
+    .map((file) => file.relativePath)
+    .filter((file) => file !== managedMarkerFile);
+}
+
+async function directoryFiles(root: string, current: string): Promise<PackageFile[]> {
+  const entries = await readdir(current, { withFileTypes: true });
+  const files: PackageFile[] = [];
+
+  for (const entry of entries) {
+    const path = join(current, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...await directoryFiles(root, path));
+      continue;
+    }
+
+    if (entry.isFile()) {
+      files.push({
+        path,
+        relativePath: relative(root, path),
+      });
+    }
+  }
+
+  return files;
+}
+
+async function removeEmptyParents(start: string, root: string): Promise<void> {
+  const resolvedRoot = resolve(root);
+  let current = resolve(start);
+
+  while (current === resolvedRoot || current.startsWith(`${resolvedRoot}/`)) {
+    if (!(await exists(current))) {
+      current = dirname(current);
+      continue;
+    }
+
+    if ((await readdir(current)).length > 0) {
+      return;
+    }
+
+    await rm(current, { force: true, recursive: true });
+    if (current === resolvedRoot) {
+      return;
+    }
+
+    current = dirname(current);
   }
 }
 

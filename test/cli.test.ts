@@ -1,6 +1,6 @@
 import { afterEach, describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { join, relative, resolve } from "node:path";
 import {
@@ -305,6 +305,89 @@ describe("agentics CLI", () => {
       ),
       /ENOENT/,
     );
+    assert.deepEqual(
+      JSON.parse(await readFile(join(context.projectDir, "agentics.json"), "utf8")),
+      { agentics: {} },
+    );
+  });
+
+  test("reinstall overwrites managed files, removes stale managed files, and preserves unmanaged files", async () => {
+    const context = await setup();
+    const libraryDir = join(context.rootDir, "content-library");
+    const installDir = join(context.projectDir, ".codex", "skills", "focus");
+
+    await createGitRepository(libraryDir);
+    await writeIndexedFocusSkill(libraryDir);
+    await writeFile(join(libraryDir, "skills", "focus", "old.md"), "old\n");
+    await writeAgenticsConfig(context, libraryDir);
+    await writeFile(
+      join(context.projectDir, "agentics.json"),
+      JSON.stringify({ agentics: { focus: { tool: "codex" } } }, null, 2),
+    );
+
+    const firstInstall = await runAgentics(context, ["install"]);
+
+    assert.equal(firstInstall.exitCode, 0, firstInstall.stderr);
+    await writeFile(join(installDir, "user.md"), "manual\n");
+    await writeFile(join(libraryDir, "skills", "focus", "SKILL.md"), "# New Focus\n");
+    await rm(join(libraryDir, "skills", "focus", "old.md"));
+
+    const reinstall = await runAgentics(context, ["install"]);
+
+    assert.equal(reinstall.exitCode, 0, reinstall.stderr);
+    assert.equal(await readFile(join(installDir, "SKILL.md"), "utf8"), "# New Focus\n");
+    await assert.rejects(readFile(join(installDir, "old.md"), "utf8"), /ENOENT/);
+    assert.equal(await readFile(join(installDir, "user.md"), "utf8"), "manual\n");
+  });
+
+  test("install aborts when source files conflict with unmanaged destination files", async () => {
+    const context = await setup();
+    const libraryDir = join(context.rootDir, "content-library");
+    const installDir = join(context.projectDir, ".codex", "skills", "focus");
+
+    await createGitRepository(libraryDir);
+    await writeIndexedFocusSkill(libraryDir);
+    await writeAgenticsConfig(context, libraryDir);
+    await writeFile(
+      join(context.projectDir, "agentics.json"),
+      JSON.stringify({ agentics: { focus: { tool: "codex" } } }, null, 2),
+    );
+    await runAgentics(context, ["install"]);
+    await writeFile(join(installDir, "notes.md"), "manual\n");
+    await writeFile(join(libraryDir, "skills", "focus", "notes.md"), "managed\n");
+
+    const result = await runAgentics(context, ["install"]);
+
+    assert.equal(result.exitCode, 1);
+    assert.match(result.stderr, /unmanaged destination file/);
+    assert.match(result.stderr, /Remove it or move it aside/);
+    assert.equal(await readFile(join(installDir, "notes.md"), "utf8"), "manual\n");
+  });
+
+  test("remove deletes managed files and manifest entries while preserving unmanaged files", async () => {
+    const context = await setup();
+    const libraryDir = join(context.rootDir, "content-library");
+    const installDir = join(context.projectDir, ".codex", "skills", "focus");
+
+    await createGitRepository(libraryDir);
+    await writeIndexedFocusSkill(libraryDir);
+    await writeAgenticsConfig(context, libraryDir);
+    await writeFile(
+      join(context.projectDir, "agentics.json"),
+      JSON.stringify({ agentics: { focus: { tool: "codex" } } }, null, 2),
+    );
+    await runAgentics(context, ["install"]);
+    await writeFile(join(installDir, "user.md"), "manual\n");
+
+    const result = await runAgentics(context, ["remove", "focus"]);
+
+    assert.equal(result.exitCode, 0, result.stderr);
+    await assert.rejects(readFile(join(installDir, "SKILL.md"), "utf8"), /ENOENT/);
+    await assert.rejects(
+      readFile(join(installDir, ".agentics-managed.json"), "utf8"),
+      /ENOENT/,
+    );
+    assert.equal(await readFile(join(installDir, "user.md"), "utf8"), "manual\n");
     assert.deepEqual(
       JSON.parse(await readFile(join(context.projectDir, "agentics.json"), "utf8")),
       { agentics: {} },
