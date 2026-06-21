@@ -24,6 +24,7 @@ import { fileURLToPath } from "node:url";
 
 const version = "0.1.0";
 const catalogFile = "catalog.json";
+const indexCatalogFile = "index.json";
 const projectManifestFile = "agentics.json";
 const managedMarkerFile = ".agentics-managed.json";
 const defaultTools = ["codex", "claude-code", "hermes"] as const;
@@ -187,13 +188,14 @@ async function addCommand(args: ParsedArgs): Promise<number> {
   }
 
   const config = await loadConfig();
-  const libraryDir = requireContentLibrary(config);
+  const libraryDir = await resolveContentLibrary(config);
   const catalog = await readCatalog(libraryDir);
   const scope = getScope(args);
 
   if (catalogHasAgentic(catalog, source)) {
-    await installOne(libraryDir, catalog, source, scope, config);
+    const tool = await installOne(libraryDir, catalog, source, scope, config);
     console.log(`Added ${source} to ${scope}`);
+    printCatalogEntry(source, catalog.agentics[source], tool);
     return 0;
   }
 
@@ -210,7 +212,7 @@ async function addCommand(args: ParsedArgs): Promise<number> {
 
 async function installCommand(args: ParsedArgs): Promise<number> {
   const config = await loadConfig();
-  const libraryDir = requireContentLibrary(config);
+  const libraryDir = await resolveContentLibrary(config);
   await syncLibrary(libraryDir);
   const catalog = await readCatalog(libraryDir);
   const scope = getScope(args);
@@ -233,7 +235,7 @@ async function removeCommand(args: ParsedArgs): Promise<number> {
   }
 
   const config = await loadConfig();
-  const libraryDir = requireContentLibrary(config);
+  const libraryDir = await resolveContentLibrary(config);
   const catalog = await readCatalog(libraryDir);
   const scope = getScope(args);
   const manifest = await readManifest(scope);
@@ -252,7 +254,7 @@ async function removeCommand(args: ParsedArgs): Promise<number> {
 
 async function updateCommand(args: ParsedArgs): Promise<number> {
   const config = await loadConfig();
-  const libraryDir = requireContentLibrary(config);
+  const libraryDir = await resolveContentLibrary(config);
   const catalog = await readCatalog(libraryDir);
   const name = args.positionals[0];
 
@@ -299,13 +301,14 @@ async function installOne(
   name: string,
   scope: InstallScope,
   config: Config,
-): Promise<void> {
+): Promise<string> {
   const tool = await resolveTool(config);
   await materialize(libraryDir, catalog, name, scope, tool);
 
   const manifest = await readManifest(scope);
   manifest.agentics[name] = { tool };
   await writeManifest(scope, manifest);
+  return tool;
 }
 
 async function materialize(
@@ -493,26 +496,43 @@ async function resolveTool(config: Config): Promise<string> {
 }
 
 async function loadConfig(): Promise<Config> {
-  const path = configPath();
-  if (!(await exists(path))) {
-    const config = { allowedTools: [...defaultTools] };
-    await writeConfig(config);
-    return config;
-  }
-
-  const parsed = JSON.parse(await readFile(path, "utf8")) as Partial<Config>;
-  return {
+  const path = await existingConfigPath();
+  const parsed = path === undefined
+    ? {}
+    : (JSON.parse(await readFile(path, "utf8")) as Partial<Config>);
+  const config: Config = {
     allowedTools: parsed.allowedTools ?? [...defaultTools],
-    contentLibrary: parsed.contentLibrary,
+    contentLibrary: parsed.contentLibrary ?? process.env.AGENTICS_CONTENT_LIBRARY,
     defaultTool: parsed.defaultTool,
   };
+  let changed =
+    path === undefined ||
+    parsed.allowedTools === undefined ||
+    (parsed.contentLibrary === undefined &&
+      process.env.AGENTICS_CONTENT_LIBRARY !== undefined);
+
+  const envDefaultTool = process.env.AGENTICS_DEFAULT_TOOL;
+  if (config.defaultTool === undefined && envDefaultTool !== undefined) {
+    if (!config.allowedTools.includes(envDefaultTool)) {
+      throw new Error(`Default tool is not allowed: ${envDefaultTool}`);
+    }
+
+    config.defaultTool = envDefaultTool;
+    changed = true;
+  }
+
+  if (changed) {
+    await writeConfig(config);
+  }
+
+  return config;
 }
 
 async function writeConfig(config: Config): Promise<void> {
   await writeJson(configPath(), config);
 }
 
-function requireContentLibrary(config: Config): string {
+async function resolveContentLibrary(config: Config): Promise<string> {
   if (config.contentLibrary === undefined || config.contentLibrary === "") {
     throw new Error(
       `Missing contentLibrary in ${configPath()}\n` +
@@ -520,23 +540,114 @@ function requireContentLibrary(config: Config): string {
     );
   }
 
-  return isAbsolute(config.contentLibrary)
+  const configured = isAbsolute(config.contentLibrary)
     ? config.contentLibrary
     : resolve(process.cwd(), config.contentLibrary);
+
+  if ((await exists(configured)) && !(await isBareRepository(configured))) {
+    return configured;
+  }
+
+  const libraryDir = managedLibraryPath();
+  if (await exists(join(libraryDir, ".git"))) {
+    return libraryDir;
+  }
+
+  if (await exists(libraryDir)) {
+    throw new Error(`Managed content library exists but is not a git clone: ${libraryDir}`);
+  }
+
+  await mkdir(agenticsHome(), { recursive: true });
+  await runCommand("git", ["clone", config.contentLibrary, libraryDir], agenticsHome());
+  return libraryDir;
 }
 
 async function readCatalog(libraryDir: string): Promise<Catalog> {
-  const path = join(libraryDir, catalogFile);
-  if (!(await exists(path))) {
+  const legacyPath = join(libraryDir, catalogFile);
+  if (await exists(legacyPath)) {
+    const parsed = JSON.parse(await readFile(legacyPath, "utf8")) as Partial<Catalog>;
+    return validateCatalog(legacyPath, { agentics: parsed.agentics ?? {} });
+  }
+
+  const indexPath = join(libraryDir, indexCatalogFile);
+  if (!(await exists(indexPath))) {
     return { agentics: {} };
   }
 
-  const parsed = JSON.parse(await readFile(path, "utf8")) as Partial<Catalog>;
-  return { agentics: parsed.agentics ?? {} };
+  const parsed = JSON.parse(await readFile(indexPath, "utf8")) as unknown;
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`Invalid catalog at ${indexPath}: expected name-keyed object`);
+  }
+
+  return validateCatalog(indexPath, {
+    agentics: parsed as Record<string, CatalogEntry>,
+  });
 }
 
 async function writeCatalog(libraryDir: string, catalog: Catalog): Promise<void> {
   await writeJson(join(libraryDir, catalogFile), catalog);
+}
+
+function validateCatalog(path: string, catalog: Catalog): Catalog {
+  const issues: string[] = [];
+
+  for (const [name, entry] of Object.entries(catalog.agentics)) {
+    issues.push(...catalogEntryIssues(name, entry));
+  }
+
+  if (issues.length > 0) {
+    throw new Error(`Invalid catalog at ${path}: ${issues.join("; ")}`);
+  }
+
+  return catalog;
+}
+
+function catalogEntryIssues(name: string, entry: unknown): string[] {
+  if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+    return [`${name}: expected object`];
+  }
+
+  const issues: string[] = [];
+
+  if (!("description" in entry) || typeof entry.description !== "string") {
+    issues.push(`${name}.description`);
+  }
+
+  if (!("path" in entry) || typeof entry.path !== "string") {
+    issues.push(`${name}.path`);
+  }
+
+  if (
+    !("type" in entry) ||
+    (entry.type !== "skill" && entry.type !== "agent" && entry.type !== "prompt")
+  ) {
+    issues.push(`${name}.type`);
+  }
+
+  if ("upstream" in entry && typeof entry.upstream !== "string") {
+    issues.push(`${name}.upstream`);
+  }
+
+  return issues;
+}
+
+function printCatalogEntry(
+  name: string,
+  entry: CatalogEntry | undefined,
+  tool: string,
+): void {
+  if (entry === undefined) {
+    return;
+  }
+
+  console.log(`${name} (${entry.type})`);
+  console.log(entry.description);
+  console.log(`tool: ${tool}`);
+  console.log(`path: ${entry.path}`);
+
+  if (entry.upstream !== undefined) {
+    console.log(`upstream: ${entry.upstream}`);
+  }
 }
 
 async function readManifest(scope: InstallScope): Promise<Manifest> {
@@ -614,7 +725,27 @@ function inferPackageName(packagePath: string): string {
 }
 
 function configPath(): string {
+  return join(agenticsHome(), "config.json");
+}
+
+function legacyConfigPath(): string {
   return join(xdgConfigHome(), "agentics", "config.json");
+}
+
+async function existingConfigPath(): Promise<string | undefined> {
+  if (await exists(configPath())) {
+    return configPath();
+  }
+
+  if (await exists(legacyConfigPath())) {
+    return legacyConfigPath();
+  }
+
+  return undefined;
+}
+
+function managedLibraryPath(): string {
+  return join(agenticsHome(), "content-library");
 }
 
 function manifestPath(scope: InstallScope): string {
@@ -643,6 +774,17 @@ function agenticsHome(): string {
 
 function xdgConfigHome(): string {
   return process.env.XDG_CONFIG_HOME ?? join(homeDir(), ".config");
+}
+
+async function isBareRepository(path: string): Promise<boolean> {
+  const result = await runCommand(
+    "git",
+    ["rev-parse", "--is-bare-repository"],
+    path,
+    false,
+  );
+
+  return result.exitCode === 0 && result.stdout.trim() === "true";
 }
 
 function parseArgs(args: string[]): ParsedArgs {
