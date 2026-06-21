@@ -360,6 +360,24 @@ async function materialize(
   const managedFiles = await managedFileSet(destination);
   const sourceFiles = await packageFiles(sourcePath);
 
+  await assertNoUnmanagedConflicts(destination, sourceFiles, managedFiles);
+  await mkdir(destination, { recursive: true });
+  await removeStaleManagedFiles(destination, sourceFiles, managedFiles);
+  await copyPackageFiles(destination, sourceFiles);
+
+  await writeJson(join(destination, managedMarkerFile), {
+    files: sourceFiles.map((file) => file.relativePath).sort(),
+    name,
+    tool,
+    type: entry.type,
+  });
+}
+
+async function assertNoUnmanagedConflicts(
+  destination: string,
+  sourceFiles: PackageFile[],
+  managedFiles: Set<string>,
+): Promise<void> {
   for (const sourceFile of sourceFiles) {
     const installedPath = join(destination, sourceFile.relativePath);
     if ((await exists(installedPath)) && !managedFiles.has(sourceFile.relativePath)) {
@@ -369,9 +387,13 @@ async function materialize(
       );
     }
   }
+}
 
-  await mkdir(destination, { recursive: true });
-
+async function removeStaleManagedFiles(
+  destination: string,
+  sourceFiles: PackageFile[],
+  managedFiles: Set<string>,
+): Promise<void> {
   const sourceFileNames = new Set(sourceFiles.map((file) => file.relativePath));
   for (const managedFile of managedFiles) {
     if (!sourceFileNames.has(managedFile)) {
@@ -380,19 +402,17 @@ async function materialize(
       await removeEmptyParents(dirname(installedPath), destination);
     }
   }
+}
 
+async function copyPackageFiles(
+  destination: string,
+  sourceFiles: PackageFile[],
+): Promise<void> {
   for (const sourceFile of sourceFiles) {
     const installedPath = join(destination, sourceFile.relativePath);
     await mkdir(dirname(installedPath), { recursive: true });
     await cp(sourceFile.path, installedPath);
   }
-
-  await writeJson(join(destination, managedMarkerFile), {
-    files: sourceFiles.map((file) => file.relativePath).sort(),
-    name,
-    tool,
-    type: entry.type,
-  });
 }
 
 async function removeMaterialized(
