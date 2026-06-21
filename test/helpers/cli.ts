@@ -25,6 +25,10 @@ interface CommandOptions {
   env?: Record<string, string>;
 }
 
+interface RunAgenticsOptions {
+  env?: Record<string, string>;
+}
+
 export async function createCliTestContext(): Promise<CliTestContext> {
   const rootDir = await mkdtemp(join(tmpdir(), "agentics-test-"));
   const homeDir = join(rootDir, "home");
@@ -44,6 +48,7 @@ export async function createCliTestContext(): Promise<CliTestContext> {
 export async function runAgentics(
   context: CliTestContext,
   args: string[] = [],
+  options: RunAgenticsOptions = {},
 ): Promise<CommandResult> {
   return runCommand("node", ["--experimental-strip-types", cliEntry, ...args], {
     cwd: context.projectDir,
@@ -51,6 +56,7 @@ export async function runAgentics(
       AGENTICS_HOME: context.homeDir,
       HOME: context.homeDir,
       XDG_CONFIG_HOME: join(context.homeDir, ".config"),
+      ...options.env,
     },
   });
 }

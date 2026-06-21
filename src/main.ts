@@ -1,6 +1,8 @@
 #!/usr/bin/env -S node --experimental-strip-types
-import { cancel, isCancel, select } from "@clack/prompts";
 import { fileURLToPath } from "node:url";
+import { agenticsHome, loadConfig, promptForTool } from "./config.ts";
+import { readCatalog } from "./catalog.ts";
+import { ensureContentLibrary } from "./library.ts";
 
 const version = "0.1.0";
 
@@ -48,22 +50,9 @@ const commandSpecs = {
 type CommandName = keyof typeof commandSpecs;
 const commandNames = Object.keys(commandSpecs) as CommandName[];
 
-export async function promptForTool(allowedTools: string[]): Promise<string> {
-  const selected = await select({
-    message: "Select default tool",
-    options: allowedTools.map((tool) => ({ label: tool, value: tool })),
-  });
+export { promptForTool };
 
-  if (isCancel(selected)) {
-    cancel("No tool selected");
-    process.exitCode = 1;
-    return "";
-  }
-
-  return selected;
-}
-
-export function run(argv: string[]): number {
+export async function run(argv: string[]): Promise<number> {
   const [command, ...args] = argv;
 
   if (command === undefined || isHelp(command)) {
@@ -80,6 +69,10 @@ export function run(argv: string[]): number {
     if (args.some(isHelp)) {
       printCommandHelp(command);
       return 0;
+    }
+
+    if (command === "add") {
+      return handleAdd(args);
     }
 
     printCommandStub(command);
@@ -123,6 +116,61 @@ function printCommandStub(command: CommandName): void {
   console.log(`agentics ${command} behavior will be implemented in a later slice.`);
 }
 
+async function handleAdd(args: string[]): Promise<number> {
+  const name = firstPositionalArg(args);
+
+  if (name === undefined) {
+    printCommandHelp("add");
+    return 1;
+  }
+
+  try {
+    const home = agenticsHome();
+    const config = await loadConfig();
+    const libraryDir = await ensureContentLibrary(config, home);
+    const catalog = await readCatalog(libraryDir);
+    const entry = catalog[name];
+
+    if (entry === undefined) {
+      console.error(`Agentic not found in catalog: ${name}`);
+      return 1;
+    }
+
+    console.log(`${name} (${entry.type})`);
+    console.log(entry.description);
+    console.log(`tool: ${config.defaultTool}`);
+    console.log(`path: ${entry.path}`);
+
+    if (entry.upstream !== undefined) {
+      console.log(`upstream: ${entry.upstream}`);
+    }
+
+    return 0;
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    return 1;
+  }
+}
+
+function firstPositionalArg(args: string[]): string | undefined {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+
+    if (arg === "--name") {
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith("-")) {
+      continue;
+    }
+
+    return arg;
+  }
+
+  return undefined;
+}
+
 function isHelp(value: string): boolean {
   return value === "--help" || value === "-h";
 }
@@ -139,5 +187,5 @@ function isMainModule(): boolean {
 }
 
 if (isMainModule()) {
-  process.exitCode = run(process.argv.slice(2));
+  process.exitCode = await run(process.argv.slice(2));
 }
