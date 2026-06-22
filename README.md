@@ -19,7 +19,7 @@ Jawfish is a small package manager for reusable agentics:
 Install:
 
 ```sh
-bun install --global jawfish
+bun install --global @devdogfish/jawfish
 ```
 
 Configure:
