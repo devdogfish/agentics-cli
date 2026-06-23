@@ -1,6 +1,6 @@
 {
   "name": "@devdogfish/jawfish",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Minimal CLI for syncing and scoping AI agent skills, agents, and prompts across tools, devices, and projects.",
   "type": "module",
   "repository": {

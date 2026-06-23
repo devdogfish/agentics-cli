@@ -1,12 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+const packageJson = JSON.parse(
+  await readFile(join(repoRoot, "package.json"), "utf8"),
+) as { version: string };
 
 interface CommandResult {
   exitCode: number | null;
@@ -45,7 +48,7 @@ test("published package exposes a runnable CLI", async () => {
       { cwd: consumerDir },
     );
     assert.equal(version.exitCode, 0, version.stderr);
-    assert.equal(version.stdout.trim(), "0.1.0");
+    assert.equal(version.stdout.trim(), packageJson.version);
   } finally {
     await rm(rootDir, { force: true, recursive: true });
   }

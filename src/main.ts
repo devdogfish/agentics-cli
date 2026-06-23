@@ -33,7 +33,7 @@ import {
   type ToolPaths,
 } from "./tool-adapters.ts";
 
-const version = "0.1.0";
+const version = "0.1.1";
 const catalogFile = "catalog.json";
 const indexCatalogFile = "index.json";
 const projectManifestFile = "jawfish.json";
