@@ -19,7 +19,7 @@ Jawfish is a small package manager for reusable agentics:
 Install:
 
 ```sh
-bun install --global @devdogfish/jawfish
+bun install --global jawfish
 ```
 
 Configure:
@@ -62,27 +62,36 @@ Project installs are tracked in `jawfish.json`. Global installs are tracked in
 
 ## Commands
 
-| Command                 | What it does                         |
-| ----------------------- | ------------------------------------ |
-| `jawfish add <name>`    | Install from your library            |
-| `jawfish add <source>`  | Import from a URL or local file      |
-| `jawfish install`       | Reinstall everything in the manifest |
-| `jawfish update [name]` | Pull upstream changes                |
-| `jawfish remove <name>` | Remove a managed install             |
+| Command                  | What it does                         |
+| ------------------------ | ------------------------------------ |
+| `jawfish add <name>`     | Install from your library            |
+| `jawfish add <source>`   | Import from a URL or local file      |
+| `jawfish install <name>` | Same as `jawfish add <name>`         |
+| `jawfish i <name>`       | Same as `jawfish add <name>`         |
+| `jawfish install`        | Reinstall everything in the manifest |
+| `jawfish i`              | Same as `jawfish install`            |
+| `jawfish update [name]`  | Pull upstream changes                |
+| `jawfish upgrade`        | Upgrade jawfish itself               |
+| `jawfish remove <name>`  | Remove a managed install             |
 
 Add `--global` to target your global tool config instead of the current
 project.
 
-Jawfish currently supports `codex`, `claude-code`, and `hermes`.
+Jawfish currently supports `codex`, `claude-code`, `hermes`, `opencode`, and
+`pi`.
 
-Project installs go into `.codex/`, `.claude/`, or `.hermes/`. Global Codex
-installs go into:
+Project installs go into `.codex/`, `.claude/`, `.hermes/`, `.opencode/`, or
+`.pi/`.
 
-```sh
-~/.codex/skills
-~/.codex/agents
-~/.codex/prompts
-```
+Global installs go into:
+
+| Tool          | Global root            |
+| ------------- | ---------------------- |
+| `codex`       | `~/.codex`             |
+| `claude-code` | `~/.claude`            |
+| `hermes`      | `~/.hermes`            |
+| `opencode`    | `~/.config/opencode`   |
+| `pi`          | `~/.pi/agent`          |
 
 ## Develop
 

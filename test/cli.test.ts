@@ -10,7 +10,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
-import { join, relative, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import {
   createBareRemote,
   createCliTestContext,
@@ -230,6 +230,14 @@ function toolRoot(
       return join(scopeRoot(context, scope), ".claude");
     case "hermes":
       return join(scopeRoot(context, scope), ".hermes");
+    case "opencode":
+      return scope === "project"
+        ? join(context.projectDir, ".opencode")
+        : join(context.homeDir, ".config", "opencode");
+    case "pi":
+      return scope === "project"
+        ? join(context.projectDir, ".pi")
+        : join(context.homeDir, ".pi", "agent");
     default:
       throw new Error(`Unsupported test tool: ${tool}`);
   }
@@ -300,8 +308,66 @@ describe("jawfish CLI", () => {
     );
   });
 
+  test("install and i with a target add the agentic", async () => {
+    for (const command of ["install", "i"]) {
+      const context = await setup();
+      const libraryDir = join(context.rootDir, "content-library");
+
+      await createGitRepository(libraryDir);
+      await writeIndexedFocusSkill(libraryDir);
+      await writeJawfishConfig(context, libraryDir);
+
+      const result = await runJawfish(context, [command, "focus"]);
+
+      assert.equal(result.exitCode, 0, result.stderr);
+      assert.equal(
+        await readFile(
+          join(context.projectDir, ".codex", "skills", "focus", "SKILL.md"),
+          "utf8",
+        ),
+        "# Focus\n\nUse focused execution.\n",
+      );
+      assert.deepEqual(
+        JSON.parse(
+          await readFile(join(context.projectDir, "jawfish.json"), "utf8"),
+        ),
+        { jawfish: { focus: { tool: "codex" } } },
+      );
+    }
+  });
+
+  test("i without a target installs the manifest", async () => {
+    const context = await setup();
+    const libraryDir = join(context.rootDir, "content-library");
+
+    await createGitRepository(libraryDir);
+    await writeIndexedFocusSkill(libraryDir);
+    await writeJawfishConfig(context, libraryDir);
+    await writeFile(
+      join(context.projectDir, "jawfish.json"),
+      JSON.stringify({ jawfish: { focus: { tool: "codex" } } }, null, 2),
+    );
+
+    const result = await runJawfish(context, ["i"]);
+
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.equal(
+      await readFile(
+        join(context.projectDir, ".codex", "skills", "focus", "SKILL.md"),
+        "utf8",
+      ),
+      "# Focus\n\nUse focused execution.\n",
+    );
+  });
+
   test("adds a name-keyed catalog skill to project and global directories for each tool", async () => {
-    for (const tool of ["codex", "claude-code", "hermes"] as const) {
+    for (const tool of [
+      "codex",
+      "claude-code",
+      "hermes",
+      "opencode",
+      "pi",
+    ] as const) {
       const context = await setup();
       const libraryDir = join(context.rootDir, "content-library");
       const codexHome = join(context.rootDir, "codex-home");
@@ -400,7 +466,84 @@ describe("jawfish CLI", () => {
 
     assert.equal(result.exitCode, 1);
     assert.match(result.stderr, /Unsupported tool: unknown/);
-    assert.match(result.stderr, /Supported tools: codex, claude-code, hermes/);
+    assert.match(
+      result.stderr,
+      /Supported tools: codex, claude-code, hermes, opencode, pi/,
+    );
+  });
+
+  test("installs native prompt files for opencode and pi", async () => {
+    for (const tool of ["opencode", "pi"] as const) {
+      const context = await setup();
+      const libraryDir = join(context.rootDir, "content-library");
+      const nativePromptPath =
+        tool === "opencode"
+          ? join(context.projectDir, ".opencode", "commands", "review.md")
+          : join(context.projectDir, ".pi", "prompts", "review.md");
+
+      await createGitRepository(libraryDir);
+      await mkdir(join(libraryDir, "prompts", "review"), {
+        recursive: true,
+      });
+      await writeFile(
+        join(libraryDir, "index.json"),
+        JSON.stringify(
+          {
+            review: {
+              description: "Review prompt",
+              path: "prompts/review",
+              type: "prompt",
+            },
+          },
+          null,
+          2,
+        ),
+      );
+      await writeFile(
+        join(libraryDir, "prompts", "review", "review.md"),
+        "# Review\n",
+      );
+      await writeJawfishConfig(context, libraryDir, tool);
+
+      const result = await runJawfish(context, ["add", "review"]);
+
+      assert.equal(result.exitCode, 0, result.stderr);
+      assert.equal(await readFile(nativePromptPath, "utf8"), "# Review\n");
+      assert.deepEqual(
+        JSON.parse(
+          await readFile(
+            join(
+              dirname(nativePromptPath),
+              ".jawfish-managed",
+              "review.md.json",
+            ),
+            "utf8",
+          ),
+        ),
+        {
+          files: ["review.md"],
+          name: "review",
+          tool,
+          type: "prompt",
+        },
+      );
+
+      const removeResult = await runJawfish(context, ["remove", "review"]);
+
+      assert.equal(removeResult.exitCode, 0, removeResult.stderr);
+      await assert.rejects(readFile(nativePromptPath, "utf8"), /ENOENT/);
+      await assert.rejects(
+        readFile(
+          join(
+            dirname(nativePromptPath),
+            ".jawfish-managed",
+            "review.md.json",
+          ),
+          "utf8",
+        ),
+        /ENOENT/,
+      );
+    }
   });
 
   test("installs and removes project manifest jawfish", async () => {
@@ -1132,12 +1275,45 @@ describe("jawfish CLI", () => {
     assert.equal(rootHelp.exitCode, 0);
     assert.match(rootHelp.stdout, /Usage: jawfish <command>/);
 
-    for (const command of ["add", "install", "update", "remove"]) {
+    for (const command of [
+      "add",
+      "install",
+      "i",
+      "update",
+      "upgrade",
+      "remove",
+    ]) {
       const result = await runJawfish(context, [command, "--help"]);
 
       assert.equal(result.exitCode, 0);
       assert.match(result.stdout, new RegExp(`Usage: jawfish ${command}`));
     }
+  });
+
+  test("upgrade updates jawfish through bun", async () => {
+    const context = await setup();
+    const fakeBinDir = join(context.rootDir, "bin");
+    const fakeBun = join(fakeBinDir, "bun");
+    const logPath = join(context.rootDir, "bun-args.txt");
+
+    await mkdir(fakeBinDir, { recursive: true });
+    await writeFile(
+      fakeBun,
+      `#!/bin/sh\nprintf '%s\\n' "$@" > ${JSON.stringify(logPath)}\necho upgraded\n`,
+    );
+    await chmod(fakeBun, 0o755);
+
+    const result = await runJawfish(context, ["upgrade"], {
+      env: { PATH: `${fakeBinDir}:${process.env.PATH ?? ""}` },
+    });
+
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.match(result.stdout, /Upgrading jawfish with bun/);
+    assert.match(result.stdout, /upgraded/);
+    assert.equal(
+      await readFile(logPath, "utf8"),
+      "update\n-g\njawfish\n--latest\n",
+    );
   });
 
   test("creates first-run config with default tools and selected default tool", async () => {
@@ -1164,7 +1340,7 @@ describe("jawfish CLI", () => {
 
     assert.deepEqual(config, {
       contentLibrary: remoteDir,
-      allowedTools: ["codex", "claude-code", "hermes"],
+      allowedTools: [...defaultAllowedTools],
       defaultTool: "claude-code",
     });
   });
@@ -1185,7 +1361,7 @@ describe("jawfish CLI", () => {
 
     assert.deepEqual(promptedTools, [...defaultAllowedTools]);
     assert.deepEqual(config, {
-      allowedTools: ["codex", "claude-code", "hermes"],
+      allowedTools: [...defaultAllowedTools],
       defaultTool: "hermes",
     });
 

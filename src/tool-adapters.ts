@@ -1,6 +1,12 @@
 import { join } from "node:path";
 
-export const supportedTools = ["codex", "claude-code", "hermes"] as const;
+export const supportedTools = [
+  "codex",
+  "claude-code",
+  "hermes",
+  "opencode",
+  "pi",
+] as const;
 
 export type SupportedTool = (typeof supportedTools)[number];
 export type AgenticType = "skill" | "agent" | "prompt";
@@ -9,30 +15,89 @@ export type InstallScope = "project" | "global";
 export interface ToolPaths {
   codexHome: string;
   homeDir: string;
+  opencodeConfigDir: string;
+  piAgentDir: string;
   projectDir: string;
 }
 
+export type DestinationSpec =
+  | { kind: "directory"; path: string }
+  | { extension: ".md"; kind: "file"; path: string };
+
 interface ToolAdapter {
-  destinationPath: (
+  destination: (
     name: string,
     type: AgenticType,
     scope: InstallScope,
     paths: ToolPaths,
-  ) => string;
+  ) => DestinationSpec;
 }
 
 const adapters = {
   codex: {
-    destinationPath: (name, type, scope, paths) =>
-      join(codexRoot(scope, paths), typeFolder(type), name),
+    destination: (name, type, scope, paths) => ({
+      kind: "directory",
+      path: join(codexRoot(scope, paths), typeFolder(type), name),
+    }),
   },
   "claude-code": {
-    destinationPath: (name, type, scope, paths) =>
-      join(scopeRoot(scope, paths), ".claude", typeFolder(type), name),
+    destination: (name, type, scope, paths) => ({
+      kind: "directory",
+      path: join(scopeRoot(scope, paths), ".claude", typeFolder(type), name),
+    }),
   },
   hermes: {
-    destinationPath: (name, type, scope, paths) =>
-      join(scopeRoot(scope, paths), ".hermes", typeFolder(type), name),
+    destination: (name, type, scope, paths) => ({
+      kind: "directory",
+      path: join(scopeRoot(scope, paths), ".hermes", typeFolder(type), name),
+    }),
+  },
+  opencode: {
+    destination: (name, type, scope, paths) => {
+      const root = opencodeRoot(scope, paths);
+      switch (type) {
+        case "agent":
+          return {
+            extension: ".md",
+            kind: "file",
+            path: join(root, "agents", `${name}.md`),
+          };
+        case "prompt":
+          return {
+            extension: ".md",
+            kind: "file",
+            path: join(root, "commands", `${name}.md`),
+          };
+        case "skill":
+          return {
+            kind: "directory",
+            path: join(root, "skills", name),
+          };
+      }
+    },
+  },
+  pi: {
+    destination: (name, type, scope, paths) => {
+      const root = piRoot(scope, paths);
+      switch (type) {
+        case "agent":
+          return {
+            kind: "directory",
+            path: join(root, "extensions", name),
+          };
+        case "prompt":
+          return {
+            extension: ".md",
+            kind: "file",
+            path: join(root, "prompts", `${name}.md`),
+          };
+        case "skill":
+          return {
+            kind: "directory",
+            path: join(root, "skills", name),
+          };
+      }
+    },
   },
 } satisfies Record<SupportedTool, ToolAdapter>;
 
@@ -55,8 +120,18 @@ export function destinationPath(
   tool: string,
   paths: ToolPaths,
 ): string {
+  return destinationSpec(name, type, scope, tool, paths).path;
+}
+
+export function destinationSpec(
+  name: string,
+  type: AgenticType,
+  scope: InstallScope,
+  tool: string,
+  paths: ToolPaths,
+): DestinationSpec {
   assertSupportedTool(tool);
-  return adapters[tool].destinationPath(name, type, scope, paths);
+  return adapters[tool].destination(name, type, scope, paths);
 }
 
 export function typeFolder(type: AgenticType): string {
@@ -76,4 +151,14 @@ function scopeRoot(scope: InstallScope, paths: ToolPaths): string {
 
 function codexRoot(scope: InstallScope, paths: ToolPaths): string {
   return scope === "project" ? join(paths.projectDir, ".codex") : paths.codexHome;
+}
+
+function opencodeRoot(scope: InstallScope, paths: ToolPaths): string {
+  return scope === "project"
+    ? join(paths.projectDir, ".opencode")
+    : paths.opencodeConfigDir;
+}
+
+function piRoot(scope: InstallScope, paths: ToolPaths): string {
+  return scope === "project" ? join(paths.projectDir, ".pi") : paths.piAgentDir;
 }

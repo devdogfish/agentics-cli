@@ -25,10 +25,11 @@ import {
 import { fileURLToPath } from "node:url";
 import {
   assertSupportedTool,
-  destinationPath,
+  destinationSpec,
   supportedTools,
   typeFolder,
   type AgenticType,
+  type DestinationSpec,
   type InstallScope,
   type ToolPaths,
 } from "./tool-adapters.ts";
@@ -132,11 +133,24 @@ const commandSpecs = {
     ],
   },
   install: {
-    description: "Materialize manifest jawfish into tool-native directories.",
-    summary: "Materialize manifest jawfish",
-    usage: "jawfish install [options]",
+    description:
+      "Install an agentic when a name/source is provided, otherwise materialize manifest jawfish.",
+    summary: "Install an agentic or manifest",
+    usage: "jawfish install [options] [name|source]",
     options: [
       "-g, --global    Install global manifest",
+      "--name <name>   Override imported package name",
+      "-h, --help      Show help",
+    ],
+  },
+  i: {
+    description:
+      "Alias for install: add a name/source, or materialize the manifest with no name/source.",
+    summary: "Alias for install",
+    usage: "jawfish i [options] [name|source]",
+    options: [
+      "-g, --global    Install global manifest",
+      "--name <name>   Override imported package name",
       "-h, --help      Show help",
     ],
   },
@@ -149,6 +163,12 @@ const commandSpecs = {
       "-F, --force     Replace dirty package contents",
       "-h, --help      Show help",
     ],
+  },
+  upgrade: {
+    description: "Upgrade the jawfish CLI itself.",
+    summary: "Upgrade jawfish itself",
+    usage: "jawfish upgrade",
+    options: ["-h, --help      Show help"],
   },
   remove: {
     description: "Remove installed managed jawfish.",
@@ -224,12 +244,20 @@ export async function run(argv: string[]): Promise<number> {
     switch (command) {
       case "add":
         return await addCommand(parsed);
+      case "i":
+        return parsed.positionals.length > 0
+          ? await addCommand(parsed)
+          : await installCommand(parsed);
       case "install":
-        return await installCommand(parsed);
+        return parsed.positionals.length > 0
+          ? await addCommand(parsed)
+          : await installCommand(parsed);
       case "remove":
         return await removeCommand(parsed);
       case "update":
         return await updateCommand(parsed);
+      case "upgrade":
+        return await upgradeCommand(parsed);
     }
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
@@ -284,6 +312,29 @@ async function installCommand(args: ParsedArgs): Promise<number> {
 
   console.log(`Installed ${names.length} jawfish to ${scope}`);
   return 0;
+}
+
+async function upgradeCommand(args: ParsedArgs): Promise<number> {
+  if (
+    args.force ||
+    args.global ||
+    args.name !== undefined ||
+    args.positionals.length > 0
+  ) {
+    console.error("Usage: jawfish upgrade");
+    return 1;
+  }
+
+  console.log("Upgrading jawfish with bun...");
+  const result = await runCommand(
+    "bun",
+    ["update", "-g", "jawfish", "--latest"],
+    process.cwd(),
+    false,
+  );
+  process.stdout.write(result.stdout);
+  process.stderr.write(result.stderr);
+  return result.exitCode === 0 ? 0 : 1;
 }
 
 async function removeCommand(args: ParsedArgs): Promise<number> {
@@ -397,27 +448,73 @@ async function materialize(
   }
 
   const sourcePath = resolveInside(libraryDir, entry.path);
-  const destination = destinationPath(
+  const destination = destinationSpec(
     name,
     entry.type,
     scope,
     tool,
     toolPaths(),
   );
-  const managedFiles = await managedFileSet(destination);
   const sourceFiles = await packageFiles(sourcePath);
 
-  await assertNoUnmanagedConflicts(destination, sourceFiles, managedFiles);
-  await mkdir(destination, { recursive: true });
-  await removeStaleManagedFiles(destination, sourceFiles, managedFiles);
-  await copyPackageFiles(destination, sourceFiles);
+  if (destination.kind === "file") {
+    await copyNativeFile(destination, sourceFiles, name, tool, entry.type);
+    return;
+  }
 
-  await writeJson(join(destination, managedMarkerFile), {
+  const managedFiles = await managedFileSet(destination.path);
+
+  await assertNoUnmanagedConflicts(destination.path, sourceFiles, managedFiles);
+  await mkdir(destination.path, { recursive: true });
+  await removeStaleManagedFiles(destination.path, sourceFiles, managedFiles);
+  await copyPackageFiles(destination.path, sourceFiles);
+
+  await writeJson(join(destination.path, managedMarkerFile), {
     files: sourceFiles.map((file) => file.relativePath).sort(),
     name,
     tool,
     type: entry.type,
   });
+}
+
+async function copyNativeFile(
+  destination: Extract<DestinationSpec, { kind: "file" }>,
+  sourceFiles: PackageFile[],
+  name: string,
+  tool: string,
+  type: AgenticType,
+): Promise<void> {
+  if (sourceFiles.length !== 1) {
+    throw new Error(
+      `Native ${destination.extension} destinations require exactly one source file: ${destination.path}`,
+    );
+  }
+
+  const [sourceFile] = sourceFiles;
+  if (extname(sourceFile.path) !== destination.extension) {
+    throw new Error(
+      `Native destination requires a ${destination.extension} source file: ${sourceFile.path}`,
+    );
+  }
+
+  await assertNoUnmanagedNativeConflict(destination.path);
+  await mkdir(dirname(destination.path), { recursive: true });
+  await cp(sourceFile.path, destination.path);
+  await writeJson(nativeMarkerPath(destination.path), {
+    files: [basename(destination.path)],
+    name,
+    tool,
+    type,
+  });
+}
+
+async function assertNoUnmanagedNativeConflict(path: string): Promise<void> {
+  if ((await exists(path)) && !(await exists(nativeMarkerPath(path)))) {
+    throw new Error(
+      `Refusing to overwrite unmanaged destination file: ${path}\n` +
+        "Remove it or move it aside, then retry.",
+    );
+  }
 }
 
 async function assertNoUnmanagedConflicts(
@@ -471,8 +568,13 @@ async function removeMaterialized(
   scope: InstallScope,
   tool: string,
 ): Promise<void> {
-  const destination = destinationPath(name, type, scope, tool, toolPaths());
-  await removeManagedDestination(destination);
+  const destination = destinationSpec(name, type, scope, tool, toolPaths());
+  if (destination.kind === "file") {
+    await removeManagedNativeFile(destination.path);
+    return;
+  }
+
+  await removeManagedDestination(destination.path);
 }
 
 async function managedFileSet(destination: string): Promise<Set<string>> {
@@ -516,6 +618,21 @@ async function removeManagedDestination(destination: string): Promise<void> {
 
   await rm(markerPath, { force: true });
   await removeEmptyParents(destination, destination);
+}
+
+async function removeManagedNativeFile(path: string): Promise<void> {
+  const markerPath = nativeMarkerPath(path);
+  if (!(await exists(markerPath))) {
+    return;
+  }
+
+  await rm(path, { force: true });
+  await rm(markerPath, { force: true });
+  await removeEmptyParents(dirname(markerPath), dirname(dirname(markerPath)));
+}
+
+function nativeMarkerPath(path: string): string {
+  return join(dirname(path), ".jawfish-managed", `${basename(path)}.json`);
 }
 
 interface PackageFile {
@@ -1231,10 +1348,22 @@ function codexHome(): string {
   return process.env.CODEX_HOME ?? join(homeDir(), ".codex");
 }
 
+function opencodeConfigDir(): string {
+  return (
+    process.env.OPENCODE_CONFIG_DIR ?? join(homeDir(), ".config", "opencode")
+  );
+}
+
+function piAgentDir(): string {
+  return join(homeDir(), ".pi", "agent");
+}
+
 function toolPaths(): ToolPaths {
   return {
     codexHome: codexHome(),
     homeDir: homeDir(),
+    opencodeConfigDir: opencodeConfigDir(),
+    piAgentDir: piAgentDir(),
     projectDir: process.cwd(),
   };
 }
