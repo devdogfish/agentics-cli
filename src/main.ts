@@ -1,5 +1,5 @@
 #!/usr/bin/env -S node --experimental-strip-types
-import { cancel, isCancel, select } from "@clack/prompts";
+import { cancel, confirm, isCancel, select } from "@clack/prompts";
 import { spawn } from "node:child_process";
 import {
   cp,
@@ -55,7 +55,6 @@ interface CommandSpec {
 }
 
 interface Config {
-  allowedTools: string[];
   contentLibrary?: string;
   defaultTool?: string;
 }
@@ -92,6 +91,7 @@ interface ParsedArgs {
   help: boolean;
   name?: string;
   positionals: string[];
+  yes: boolean;
 }
 
 interface CommandResult {
@@ -118,6 +118,22 @@ interface BulkUpdateSummary {
   failed: BulkUpdateFailure[];
   skipped: string[];
   updated: string[];
+}
+
+interface DiscoveredSkill {
+  name: string;
+  path: string;
+}
+
+interface ImportSkillsPlan {
+  conflicts: string[];
+  imported: DiscoveredSkill[];
+  skipped: ImportSkillsSkip[];
+}
+
+interface ImportSkillsSkip {
+  name: string;
+  reason: string;
 }
 
 const commandSpecs = {
@@ -154,6 +170,15 @@ const commandSpecs = {
       "-h, --help      Show help",
     ],
   },
+  "import-skills": {
+    description: "Import existing global skills from a supported tool.",
+    summary: "Import global provider skills",
+    usage: "jawfish import-skills [options] <provider>",
+    options: [
+      "-y, --yes      Import without prompting",
+      "-h, --help     Show help",
+    ],
+  },
   update: {
     description: "Refresh one or all upstream-backed jawfish.",
     summary: "Update upstream-backed jawfish",
@@ -184,10 +209,10 @@ const commandSpecs = {
 type CommandName = keyof typeof commandSpecs;
 const commandNames = Object.keys(commandSpecs) as CommandName[];
 
-export async function promptForTool(allowedTools: string[]): Promise<string> {
+export async function promptForTool(tools: readonly string[]): Promise<string> {
   const selected = await select({
     message: "Select default tool",
-    options: allowedTools.map((tool) => ({ label: tool, value: tool })),
+    options: tools.map((tool) => ({ label: tool, value: tool })),
   });
 
   if (isCancel(selected)) {
@@ -252,6 +277,8 @@ export async function run(argv: string[]): Promise<number> {
         return parsed.positionals.length > 0
           ? await addCommand(parsed)
           : await installCommand(parsed);
+      case "import-skills":
+        return await importSkillsCommand(parsed);
       case "remove":
         return await removeCommand(parsed);
       case "update":
@@ -306,11 +333,53 @@ async function installCommand(args: ParsedArgs): Promise<number> {
 
   for (const name of names) {
     const tool = manifest.jawfish[name].tool;
-    assertConfiguredTool(config, tool);
+    assertSupportedConfiguredTool(tool, `manifest entry "${name}"`);
     await materialize(libraryDir, catalog, name, scope, tool);
   }
 
   console.log(`Installed ${names.length} jawfish to ${scope}`);
+  return 0;
+}
+
+async function importSkillsCommand(args: ParsedArgs): Promise<number> {
+  const provider = args.positionals[0];
+  if (
+    provider === undefined ||
+    args.positionals.length !== 1 ||
+    args.force ||
+    args.global ||
+    args.name !== undefined
+  ) {
+    console.error("Usage: jawfish import-skills [options] <provider>");
+    return 1;
+  }
+
+  assertSupportedConfiguredTool(provider, "provider");
+
+  const config = await loadConfig();
+  const libraryDir = await resolveContentLibrary(config);
+  const catalog = await readCatalog(libraryDir);
+  const sourceRoot = globalSkillRoot(provider);
+  const plan = await planSkillImport(sourceRoot, catalog);
+
+  printImportSkillsPlan(provider, sourceRoot, plan);
+
+  if (plan.imported.length === 0) {
+    return 0;
+  }
+
+  if (!args.yes && !(await confirmImportSkills(plan.imported.length))) {
+    console.log("Import cancelled");
+    return 0;
+  }
+
+  await applySkillImport(libraryDir, catalog, provider, plan.imported);
+  await writeCatalog(libraryDir, catalog);
+  if (!(await pushLibraryChanges(libraryDir, `import skills from ${provider}`))) {
+    return 1;
+  }
+
+  console.log(`Imported ${plan.imported.length} skills from ${provider}`);
   return 0;
 }
 
@@ -353,7 +422,10 @@ async function removeCommand(args: ParsedArgs): Promise<number> {
   const catalogEntry = catalog.jawfish[name];
 
   if (manifestEntry !== undefined && catalogEntry !== undefined) {
-    assertConfiguredTool(config, manifestEntry.tool);
+    assertSupportedConfiguredTool(
+      manifestEntry.tool,
+      `manifest entry "${name}"`,
+    );
     await removeMaterialized(
       name,
       catalogEntry.type,
@@ -734,6 +806,120 @@ async function importPackage(
   return name;
 }
 
+async function planSkillImport(
+  sourceRoot: string,
+  catalog: Catalog,
+): Promise<ImportSkillsPlan> {
+  const plan: ImportSkillsPlan = { conflicts: [], imported: [], skipped: [] };
+  if (!(await exists(sourceRoot))) {
+    return plan;
+  }
+
+  const entries = await readdir(sourceRoot, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name.startsWith(".")) {
+      continue;
+    }
+
+    const sourcePath = join(sourceRoot, entry.name);
+    const skillPath = join(sourcePath, "SKILL.md");
+    if (!(await exists(skillPath))) {
+      plan.skipped.push({
+        name: entry.name,
+        reason: "missing SKILL.md",
+      });
+      continue;
+    }
+
+    if (catalogHasAgentic(catalog, entry.name)) {
+      plan.conflicts.push(entry.name);
+      continue;
+    }
+
+    plan.imported.push({ name: entry.name, path: sourcePath });
+  }
+
+  plan.conflicts.sort();
+  plan.imported.sort((left, right) => left.name.localeCompare(right.name));
+  plan.skipped.sort((left, right) => left.name.localeCompare(right.name));
+  return plan;
+}
+
+function printImportSkillsPlan(
+  provider: string,
+  sourceRoot: string,
+  plan: ImportSkillsPlan,
+): void {
+  console.log(`Import skills from ${provider}`);
+  console.log(`source: ${sourceRoot}`);
+  console.log(
+    `import: ${formatSummaryNames(plan.imported.map((skill) => skill.name))}`,
+  );
+  console.log(`conflicts: ${formatSummaryNames(plan.conflicts)}`);
+  console.log(
+    `skipped: ${
+      plan.skipped.length === 0
+        ? "none"
+        : plan.skipped.map((skip) => `${skip.name} (${skip.reason})`).join(", ")
+    }`,
+  );
+}
+
+async function confirmImportSkills(count: number): Promise<boolean> {
+  const selected = await confirm({
+    message: `Import ${count} skills?`,
+    initialValue: true,
+  });
+
+  if (isCancel(selected)) {
+    cancel("Import cancelled");
+    return false;
+  }
+
+  return selected;
+}
+
+async function applySkillImport(
+  libraryDir: string,
+  catalog: Catalog,
+  provider: string,
+  skills: DiscoveredSkill[],
+): Promise<void> {
+  const manifest = await readManifest("global");
+
+  for (const skill of skills) {
+    const packagePath = join(typeFolder("skill"), skill.name);
+    const destination = resolveInside(libraryDir, packagePath);
+
+    await rm(destination, { force: true, recursive: true });
+    await mkdir(dirname(destination), { recursive: true });
+    await cp(skill.path, destination, { recursive: true });
+    await rm(join(destination, managedMarkerFile), { force: true });
+
+    catalog.jawfish[skill.name] = {
+      description: "",
+      path: packagePath,
+      type: "skill",
+    };
+    manifest.jawfish[skill.name] = { tool: provider };
+    await adoptGlobalSkill(skill, provider);
+  }
+
+  await writeManifest("global", manifest);
+}
+
+async function adoptGlobalSkill(
+  skill: DiscoveredSkill,
+  provider: string,
+): Promise<void> {
+  await writeJson(join(skill.path, managedMarkerFile), {
+    files: (await installedFiles(skill.path)).sort(),
+    name: skill.name,
+    tool: provider,
+    type: "skill",
+  });
+}
+
 async function acquireSource(source: string): Promise<AcquiredSource> {
   return isUrl(source) ? acquireUrlSource(source) : acquireLocalSource(source);
 }
@@ -982,70 +1168,69 @@ async function reinstallInScopeIfPresent(
   catalog: Catalog,
   name: string,
   scope: InstallScope,
-  config: Config,
+  _config: Config,
 ): Promise<void> {
   const manifest = await readManifest(scope);
   const entry = manifest.jawfish[name];
   if (entry !== undefined) {
-    assertConfiguredTool(config, entry.tool);
+    assertSupportedConfiguredTool(entry.tool, `manifest entry "${name}"`);
     await materialize(libraryDir, catalog, name, scope, entry.tool);
   }
 }
 
 async function resolveTool(config: Config): Promise<string> {
-  const allowedTools =
-    config.allowedTools.length > 0 ? config.allowedTools : [...defaultTools];
-  config.allowedTools = allowedTools;
-
   if (config.defaultTool !== undefined) {
-    assertConfiguredTool(config, config.defaultTool);
+    assertSupportedConfiguredTool(config.defaultTool, "config defaultTool");
     return config.defaultTool;
   }
 
-  const selected = await promptForTool(allowedTools);
+  const selected = await promptForTool(defaultTools);
   if (selected === "") {
     throw new Error("No default tool selected");
   }
 
-  assertConfiguredTool(config, selected);
+  assertSupportedConfiguredTool(selected, "selected default tool");
   config.defaultTool = selected;
   await writeConfig(config);
   return selected;
 }
 
-function assertConfiguredTool(config: Config, tool: string): void {
-  if (!config.allowedTools.includes(tool)) {
+function assertSupportedConfiguredTool(tool: string, source: string): void {
+  try {
+    assertSupportedTool(tool);
+  } catch {
     throw new Error(
-      `Tool is not configured: ${tool}. Configured tools: ${config.allowedTools.join(", ")}`,
+      `Unsupported ${source}: ${tool}. Supported tools: ${supportedTools.join(", ")}`,
     );
   }
-
-  assertSupportedTool(tool);
 }
+
+type RawConfig = Partial<Config> & { allowedTools?: unknown };
 
 async function loadConfig(): Promise<Config> {
   const path = await existingConfigPath();
   const parsed =
     path === undefined
       ? {}
-      : (JSON.parse(await readFile(path, "utf8")) as Partial<Config>);
+      : (JSON.parse(await readFile(path, "utf8")) as RawConfig);
   const config: Config = {
-    allowedTools: parsed.allowedTools ?? [...defaultTools],
     contentLibrary:
       parsed.contentLibrary ?? process.env.JAWFISH_CONTENT_LIBRARY,
     defaultTool: parsed.defaultTool,
   };
   let changed =
     path === undefined ||
-    parsed.allowedTools === undefined ||
+    parsed.allowedTools !== undefined ||
     (parsed.contentLibrary === undefined &&
       process.env.JAWFISH_CONTENT_LIBRARY !== undefined);
 
   const envDefaultTool = process.env.JAWFISH_DEFAULT_TOOL;
   if (config.defaultTool === undefined && envDefaultTool !== undefined) {
-    assertConfiguredTool(config, envDefaultTool);
+    assertSupportedConfiguredTool(envDefaultTool, "JAWFISH_DEFAULT_TOOL");
     config.defaultTool = envDefaultTool;
     changed = true;
+  } else if (config.defaultTool !== undefined) {
+    assertSupportedConfiguredTool(config.defaultTool, "config defaultTool");
   }
 
   if (changed) {
@@ -1368,6 +1553,18 @@ function toolPaths(): ToolPaths {
   };
 }
 
+function globalSkillRoot(tool: string): string {
+  return dirname(
+    destinationSpec(
+      "__jawfish_import_probe__",
+      "skill",
+      "global",
+      tool,
+      toolPaths(),
+    ).path,
+  );
+}
+
 function getScope(args: ParsedArgs): InstallScope {
   return args.global ? "global" : "project";
 }
@@ -1401,6 +1598,7 @@ function parseArgs(args: string[]): ParsedArgs {
     global: false,
     help: false,
     positionals: [],
+    yes: false,
   };
 
   for (let index = 0; index < args.length; index += 1) {
@@ -1417,6 +1615,10 @@ function parseArgs(args: string[]): ParsedArgs {
       case "-h":
       case "--help":
         parsed.help = true;
+        break;
+      case "-y":
+      case "--yes":
+        parsed.yes = true;
         break;
       case "--name": {
         const name = args[index + 1];

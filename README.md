@@ -26,7 +26,6 @@ Configure:
 
 ```json
 {
-  "allowedTools": ["codex"],
   "defaultTool": "codex",
   "contentLibrary": "git@github.com:you/agentics.git"
 }
@@ -62,23 +61,32 @@ Project installs are tracked in `jawfish.json`. Global installs are tracked in
 
 ## Commands
 
-| Command                  | What it does                         |
-| ------------------------ | ------------------------------------ |
-| `jawfish add <name>`     | Install from your library            |
-| `jawfish add <source>`   | Import from a URL or local file      |
-| `jawfish install <name>` | Same as `jawfish add <name>`         |
-| `jawfish i <name>`       | Same as `jawfish add <name>`         |
-| `jawfish install`        | Reinstall everything in the manifest |
-| `jawfish i`              | Same as `jawfish install`            |
-| `jawfish update [name]`  | Pull upstream changes                |
-| `jawfish upgrade`        | Upgrade jawfish itself               |
-| `jawfish remove <name>`  | Remove a managed install             |
+| Command                            | What it does                         |
+| ---------------------------------- | ------------------------------------ |
+| `jawfish add <name>`               | Install from your library            |
+| `jawfish add <source>`             | Import from a URL or local file      |
+| `jawfish import-skills <provider>` | Import global provider skills        |
+| `jawfish install <name>`           | Same as `jawfish add <name>`         |
+| `jawfish i <name>`                 | Same as `jawfish add <name>`         |
+| `jawfish install`                  | Reinstall everything in the manifest |
+| `jawfish i`                        | Same as `jawfish install`            |
+| `jawfish update [name]`            | Pull upstream changes                |
+| `jawfish upgrade`                  | Upgrade jawfish itself               |
+| `jawfish remove <name>`            | Remove a managed install             |
+| `jawfish --version`                | Print jawfish version                |
+| `jawfish -v`                       | Same as `jawfish --version`          |
 
-Add `--global` to target your global tool config instead of the current
-project.
+`import-skills` previews found skills and conflicts, then asks before writing.
+Add `-y` or `--yes` to import without the prompt.
+
+Add `--global` or `-g` to target your global tool config instead of the
+current project.
 
 Jawfish currently supports `codex`, `claude-code`, `hermes`, `openclaw`,
 `opencode`, and `pi`.
+
+`defaultTool` must be one of those supported tools. You can also set it with
+`JAWFISH_DEFAULT_TOOL`.
 
 Project installs go into `.codex/`, `.claude/`, `.hermes/`, `skills/`,
 `.opencode/`, or `.pi/`.

@@ -5,17 +5,16 @@ import { dirname, join } from "node:path";
 import { errorHasCode, errorMessage } from "./errors.ts";
 import { supportedTools } from "./tool-adapters.ts";
 
-export const defaultAllowedTools = supportedTools;
+export const defaultSupportedTools = supportedTools;
 
 export interface JawfishConfig {
   contentLibrary?: string;
-  allowedTools: string[];
   defaultTool?: string;
 }
 
 interface LoadConfigOptions {
   env?: NodeJS.ProcessEnv;
-  promptForDefaultTool?: (allowedTools: string[]) => Promise<string>;
+  promptForDefaultTool?: (supportedTools: string[]) => Promise<string>;
 }
 
 export function jawfishHome(env: NodeJS.ProcessEnv = process.env): string {
@@ -33,11 +32,8 @@ export async function loadConfig(
   const home = jawfishHome(env);
   const filePath = configPath(home);
   const existing = await readConfig(filePath);
-  const config: JawfishConfig = {
-    ...existing,
-    allowedTools: existing.allowedTools ?? [...defaultAllowedTools],
-  };
-  let changed = existing.allowedTools === undefined;
+  const { allowedTools: _allowedTools, ...config } = existing;
+  let changed = existing.allowedTools !== undefined;
 
   if (config.contentLibrary === undefined && env.JAWFISH_CONTENT_LIBRARY) {
     config.contentLibrary = env.JAWFISH_CONTENT_LIBRARY;
@@ -45,12 +41,10 @@ export async function loadConfig(
   }
 
   if (config.defaultTool === undefined) {
-    config.defaultTool = await chooseDefaultTool(
-      config.allowedTools,
-      options,
-      env,
-    );
+    config.defaultTool = await chooseDefaultTool(options, env);
     changed = true;
+  } else {
+    assertSupportedDefaultTool(config.defaultTool, "config defaultTool");
   }
 
   if (changed) {
@@ -75,26 +69,28 @@ export async function promptForTool(allowedTools: string[]): Promise<string> {
 }
 
 async function chooseDefaultTool(
-  allowedTools: string[],
   options: LoadConfigOptions,
   env: NodeJS.ProcessEnv,
 ): Promise<string> {
   const envDefault = env.JAWFISH_DEFAULT_TOOL;
 
   if (envDefault !== undefined) {
-    if (!allowedTools.includes(envDefault)) {
-      throw new Error(`Default tool is not allowed: ${envDefault}`);
-    }
-
+    assertSupportedDefaultTool(envDefault, "JAWFISH_DEFAULT_TOOL");
     return envDefault;
   }
 
-  return (options.promptForDefaultTool ?? promptForTool)(allowedTools);
+  const selected = await (options.promptForDefaultTool ?? promptForTool)([
+    ...supportedTools,
+  ]);
+  assertSupportedDefaultTool(selected, "selected default tool");
+  return selected;
 }
 
-async function readConfig(path: string): Promise<Partial<JawfishConfig>> {
+type RawConfig = Partial<JawfishConfig> & { allowedTools?: unknown };
+
+async function readConfig(path: string): Promise<RawConfig> {
   try {
-    return JSON.parse(await readFile(path, "utf8")) as Partial<JawfishConfig>;
+    return JSON.parse(await readFile(path, "utf8")) as RawConfig;
   } catch (error) {
     if (errorHasCode(error, "ENOENT")) {
       return {};
@@ -107,4 +103,12 @@ async function readConfig(path: string): Promise<Partial<JawfishConfig>> {
 async function writeConfig(path: string, config: JawfishConfig): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, `${JSON.stringify(config, null, 2)}\n`);
+}
+
+function assertSupportedDefaultTool(tool: string, source: string): void {
+  if (!supportedTools.includes(tool as (typeof supportedTools)[number])) {
+    throw new Error(
+      `Unsupported ${source}: ${tool}. Supported tools: ${supportedTools.join(", ")}`,
+    );
+  }
 }
