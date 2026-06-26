@@ -159,13 +159,7 @@ function printInspection(inspection: AgenticsRepoInspection): void {
       `${formatCount(inspection.counts.agent, "agent")}, ` +
       `${formatCount(inspection.counts.prompt, "prompt")}`,
   );
-  console.log(
-    `Usable: ${
-      inspection.usableNames.length === 0
-        ? "none"
-        : inspection.usableNames.join(", ")
-    }`,
-  );
+  console.log(`Usable: ${formatNames(inspection.usableNames)}`);
 
   if (
     inspection.usableNames.length === 0 &&
@@ -185,4 +179,12 @@ function printInspection(inspection: AgenticsRepoInspection): void {
 
 function formatCount(count: number, singular: string): string {
   return `${count} ${count === 1 ? singular : `${singular}s`}`;
+}
+
+function formatNames(names: string[]): string {
+  if (names.length === 0) {
+    return "none";
+  }
+
+  return names.join(", ");
 }

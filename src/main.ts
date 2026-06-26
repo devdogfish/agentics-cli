@@ -43,6 +43,7 @@ import {
 } from "./agentics-repo.ts";
 import {
   agenticTypes,
+  isAgenticType,
   readCatalog,
   writeCatalog,
   type Catalog,
@@ -1250,10 +1251,6 @@ function parseHtmlLinks(html: string): string[] {
     .filter(
       (href) => href !== "" && !href.startsWith("#") && !href.startsWith("?"),
     );
-}
-
-function isAgenticType(value: string): value is AgenticType {
-  return agenticTypes.includes(value as AgenticType);
 }
 
 function isImportableChildUrl(childUrl: URL, parentUrl: string): boolean {
