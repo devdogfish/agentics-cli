@@ -17,8 +17,14 @@ export interface AgenticsRepoInspection {
   broken: InspectionIssue[];
   catalogPath?: string;
   counts: Record<AgenticType, number>;
+  usable: AgenticsRepoUsableEntry[];
   skipped: InspectionIssue[];
   usableNames: string[];
+}
+
+export interface AgenticsRepoUsableEntry {
+  entry: CatalogEntry;
+  name: string;
 }
 
 export interface InspectionIssue {
@@ -62,6 +68,7 @@ export async function inspectAgenticsRepo(
     catalogPath: raw.path,
     counts: { agent: 0, prompt: 0, skill: 0 },
     skipped: [],
+    usable: [],
     usableNames: [],
   };
 
@@ -81,9 +88,11 @@ export async function inspectAgenticsRepo(
     }
 
     registeredPaths.add(normalizeRepoPath(catalogEntry.path));
+    inspection.usable.push({ entry: catalogEntry, name });
     inspection.usableNames.push(name);
   }
 
+  inspection.usable.sort((left, right) => left.name.localeCompare(right.name));
   inspection.usableNames.sort((left, right) => left.localeCompare(right));
   inspection.skipped = await unregisteredEntries(agenticsRepoDir, registeredPaths);
   return inspection;

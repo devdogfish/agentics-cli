@@ -2497,6 +2497,134 @@ describe("jawfish CLI", () => {
     assert.match(result.stdout, /Usable: focus/);
   });
 
+  test("interactive init installs selected project entries and preserves omitted existing entries", async () => {
+    const context = await setup();
+    const agenticsRepoDir = join(context.rootDir, "agentics");
+
+    await createGitRepository(agenticsRepoDir);
+    await mkdir(join(agenticsRepoDir, "skills", "focus"), { recursive: true });
+    await mkdir(join(agenticsRepoDir, "agents", "review"), { recursive: true });
+    await writeFile(
+      join(agenticsRepoDir, "index.json"),
+      JSON.stringify(
+        {
+          focus: {
+            description: "Focus workflow",
+            path: "skills/focus",
+            type: "skill",
+          },
+          review: {
+            description: "Review changes",
+            path: "agents/review",
+            type: "agent",
+          },
+        },
+        null,
+        2,
+      ),
+    );
+    await writeFile(join(agenticsRepoDir, "skills", "focus", "SKILL.md"), "# Focus\n");
+    await writeFile(join(agenticsRepoDir, "agents", "review", "AGENT.md"), "# Review\n");
+    await writeFile(
+      configPath(context.homeDir),
+      `${JSON.stringify({
+        agenticsRepo: agenticsRepoDir,
+        defaultTool: "codex",
+      })}\n`,
+    );
+    await writeFile(
+      join(context.projectDir, "jawfish.json"),
+      JSON.stringify(
+        {
+          jawfish: {
+            focus: { tool: "codex" },
+            ghost: { tool: "codex" },
+          },
+        },
+        null,
+        2,
+      ),
+    );
+
+    const result = await runJawfish(context, ["init"], {
+      input: " \x1B[B \r",
+    });
+
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.match(result.stdout, /Initialized project/);
+    assert.match(result.stdout, /Installed review to project/);
+    assert.deepEqual(
+      JSON.parse(await readFile(join(context.projectDir, "jawfish.json"), "utf8")),
+      {
+        jawfish: {
+          focus: { tool: "codex" },
+          ghost: { tool: "codex" },
+          review: { tool: "codex" },
+        },
+      },
+    );
+    assert.equal(
+      await readFile(
+        join(context.projectDir, ".codex", "agents", "review", "AGENT.md"),
+        "utf8",
+      ),
+      "# Review\n",
+    );
+    await assert.rejects(
+      readFile(
+        join(context.projectDir, ".codex", "skills", "focus", "SKILL.md"),
+        "utf8",
+      ),
+      { code: "ENOENT" },
+    );
+  });
+
+  test("interactive init continues to project setup after first machine setup", async () => {
+    const context = await setup();
+    const agenticsRepoDir = join(context.rootDir, "agentics");
+
+    await createGitRepository(agenticsRepoDir);
+    await writeIndexedFocusSkill(agenticsRepoDir);
+
+    const result = await runJawfish(context, ["init"], {
+      env: {
+        JAWFISH_AGENTICS_REPO: agenticsRepoDir,
+        JAWFISH_DEFAULT_TOOL: "codex",
+      },
+      input: " \r",
+    });
+
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.match(result.stdout, /Initialized jawfish/);
+    assert.match(result.stdout, /Initialized project/);
+    assert.match(result.stdout, /Installed focus to project/);
+    await assertJsonFile(join(context.projectDir, "jawfish.json"), {
+      jawfish: { focus: { tool: "codex" } },
+    });
+  });
+
+  test("interactive init with empty registered repo ensures project manifest", async () => {
+    const context = await setup();
+    const agenticsRepoDir = join(context.rootDir, "agentics");
+
+    await createGitRepository(agenticsRepoDir);
+    await writeFile(
+      configPath(context.homeDir),
+      `${JSON.stringify({
+        agenticsRepo: agenticsRepoDir,
+        defaultTool: "codex",
+      })}\n`,
+    );
+
+    const result = await runJawfish(context, ["init"]);
+
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.match(result.stdout, /No registered agentics are selectable/);
+    await assertJsonFile(join(context.projectDir, "jawfish.json"), {
+      jawfish: {},
+    });
+  });
+
   test("init rejects positional args and unsupported options with init usage", async () => {
     const context = await setup();
 

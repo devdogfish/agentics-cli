@@ -1,3 +1,4 @@
+import { cancel, isCancel, multiselect } from "@clack/prompts";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import {
@@ -6,6 +7,7 @@ import {
   inspectAgenticsRepo,
   type AgenticsRepoInspection,
 } from "./agentics-repo.ts";
+import { type Catalog } from "./catalog.ts";
 import {
   assertSupportedConfiguredTool,
   configPath,
@@ -19,6 +21,11 @@ import {
   type JawfishConfig,
 } from "./config.ts";
 import { exists } from "./files.ts";
+import {
+  installManifestEntry,
+  readManifest,
+  type Manifest,
+} from "./install.ts";
 import { runCommand } from "./process.ts";
 
 interface InitCommandArgs {
@@ -49,14 +56,24 @@ export async function initCommand(args: InitCommandArgs): Promise<number> {
     const config = await createMachineSetup();
     console.log(`Initialized jawfish at ${configPath()}`);
     console.log(`Agentics repo: ${config.agenticsRepo}`);
-    await printAgenticsRepoInspection(config.agenticsRepo);
+    if (args.yes) {
+      await printAgenticsRepoInspection(config.agenticsRepo);
+      return 0;
+    }
+
+    await runProjectSetup(config);
     return 0;
   }
 
   const config = await validateMachineSetup();
-  await ensureProjectManifest();
-  console.log(`Initialized project at ${manifestPath("project")}`);
-  await printAgenticsRepoInspection(config.agenticsRepo);
+  if (args.yes) {
+    await ensureProjectManifest();
+    console.log(`Initialized project at ${manifestPath("project")}`);
+    await printAgenticsRepoInspection(config.agenticsRepo);
+    return 0;
+  }
+
+  await runProjectSetup(config);
   return 0;
 }
 
@@ -133,6 +150,81 @@ async function ensureManifest(path: string): Promise<void> {
   await writeFile(path, `${JSON.stringify({ jawfish: {} }, null, 2)}\n`);
 }
 
+async function runProjectSetup(config: JawfishConfig): Promise<void> {
+  const agenticsRepoDir = resolveAgenticsRepoPath(config.agenticsRepo);
+  const inspection = await inspectAgenticsRepo(agenticsRepoDir);
+  const manifest = await readManifest("project");
+
+  console.log(`Initialized project at ${manifestPath("project")}`);
+  printInspection(inspection);
+
+  if (inspection.usable.length === 0) {
+    await ensureProjectManifest();
+    console.log("No registered agentics are selectable. Add or import agentics first.");
+    return;
+  }
+
+  const selected = await selectProjectAgentics(inspection, manifest);
+  if (selected === undefined) {
+    return;
+  }
+
+  if (selected.length === 0) {
+    await ensureProjectManifest();
+    console.log("No project agentics selected");
+    return;
+  }
+
+  const tool = configuredDefaultTool(config);
+  const catalog = catalogFromInspection(inspection);
+  for (const name of selected) {
+    await installManifestEntry(agenticsRepoDir, catalog, name, "project", tool);
+    console.log(`Installed ${name} to project`);
+  }
+}
+
+async function selectProjectAgentics(
+  inspection: AgenticsRepoInspection,
+  manifest: Manifest,
+): Promise<string[] | undefined> {
+  const selected = await multiselect({
+    message: "Select project agentics",
+    options: inspection.usable.map(({ entry, name }) => ({
+      hint: entry.description,
+      label: `${name} (${entry.type})`,
+      value: name,
+    })),
+    initialValues: Object.keys(manifest.jawfish).filter((name) =>
+      inspection.usableNames.includes(name),
+    ),
+    required: false,
+  });
+
+  if (isCancel(selected)) {
+    cancel("Project setup cancelled");
+    throw new Error("Project setup cancelled");
+  }
+
+  return selected;
+}
+
+function catalogFromInspection(inspection: AgenticsRepoInspection): Catalog {
+  return {
+    jawfish: Object.fromEntries(
+      inspection.usable.map(({ entry, name }) => [name, entry]),
+    ),
+  };
+}
+
+function configuredDefaultTool(config: JawfishConfig): string {
+  if (config.defaultTool === undefined || config.defaultTool === "") {
+    throw new Error(`Missing defaultTool in ${configPath()}`);
+  }
+
+  assertSupportedConfiguredTool(config.defaultTool, "config defaultTool");
+  return config.defaultTool;
+}
+
 async function printAgenticsRepoInspection(
   agenticsRepo: string | undefined,
 ): Promise<void> {
@@ -149,6 +241,16 @@ async function printAgenticsRepoInspection(
     : resolve(process.cwd(), agenticsRepo);
   const inspection = await inspectAgenticsRepo(agenticsRepoDir);
   printInspection(inspection);
+}
+
+function resolveAgenticsRepoPath(agenticsRepo: string | undefined): string {
+  if (agenticsRepo === undefined || agenticsRepo === "") {
+    throw new Error(`Missing agenticsRepo in ${configPath()}`);
+  }
+
+  return isAbsolute(agenticsRepo)
+    ? agenticsRepo
+    : resolve(process.cwd(), agenticsRepo);
 }
 
 function printInspection(inspection: AgenticsRepoInspection): void {

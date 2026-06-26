@@ -23,10 +23,12 @@ export interface CliTestContext {
 interface CommandOptions {
   cwd: string;
   env?: Record<string, string>;
+  input?: string;
 }
 
 interface RunJawfishOptions {
   env?: Record<string, string>;
+  input?: string;
 }
 
 export async function createCliTestContext(): Promise<CliTestContext> {
@@ -60,6 +62,7 @@ export async function runJawfish(
       XDG_CONFIG_HOME: join(context.homeDir, ".config"),
       ...options.env,
     },
+    input: options.input,
   });
 }
 
@@ -104,8 +107,10 @@ async function runCommand(
   const child = spawn(command, args, {
     cwd: options.cwd,
     env: { ...process.env, ...options.env },
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["pipe", "pipe", "pipe"],
   });
+
+  child.stdin.end(options.input ?? "");
 
   const [stdout, stderr, exitCode] = await Promise.all([
     readStream(child.stdout),
