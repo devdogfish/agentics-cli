@@ -1,7 +1,8 @@
-import { cp, mkdir, readdir, realpath, rm } from "node:fs/promises";
-import { dirname, join, relative } from "node:path";
+import { cp, mkdir, readdir, rm } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { writeCatalog, type Catalog } from "./catalog.ts";
 import { exists } from "./files.ts";
+import { inferredLocalGitUpstream } from "./git-source.ts";
 import {
   installedFiles,
   managedMarkerFile,
@@ -13,7 +14,6 @@ import {
 import { pushAgenticsRepoChanges } from "./agentics-repo.ts";
 import { toolPaths } from "./config.ts";
 import { destinationSpec, typeFolder } from "./tool-adapters.ts";
-import { runCommand } from "./process.ts";
 
 interface PathOptions {
   cwd?: string;
@@ -192,32 +192,4 @@ async function adoptGlobalSkill(
     tool: provider,
     type: "skill",
   });
-}
-
-async function inferredLocalGitUpstream(
-  sourcePath: string,
-): Promise<string | undefined> {
-  const topLevel = await runCommand(
-    "git",
-    ["rev-parse", "--show-toplevel"],
-    sourcePath,
-    false,
-  );
-  if (topLevel.exitCode !== 0 || topLevel.stdout.trim() === "") {
-    return undefined;
-  }
-
-  const rootPath = await realpath(topLevel.stdout.trim());
-  const origin = await runCommand(
-    "git",
-    ["config", "--get", "remote.origin.url"],
-    rootPath,
-    false,
-  );
-  const originUrl = origin.stdout.trim();
-  if (origin.exitCode !== 0 || originUrl === "") {
-    return undefined;
-  }
-
-  return `${originUrl}#${relative(rootPath, sourcePath).replaceAll("\\", "/")}`;
 }

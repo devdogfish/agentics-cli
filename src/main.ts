@@ -33,6 +33,7 @@ import {
   type JawfishConfig,
 } from "./config.ts";
 import { exists } from "./files.ts";
+import { gitRemoteOrigin, gitTopLevelPath } from "./git-source.ts";
 import { initCommand } from "./init-command.ts";
 import {
   assertCanMaterializePackage,
@@ -799,31 +800,51 @@ async function repoSkillCandidates(
   repoSource: RepoSource,
 ): Promise<RepoSkillCandidate[]> {
   const skillDirs = await findSkillDirectories(repoSource.rootPath);
-  const candidates = skillDirs.map((sourcePath) => {
-    const relativePath = normalizePath(relative(repoSource.rootPath, sourcePath)) || ".";
-    const upstream = repoSkillUpstream(repoSource, relativePath, sourcePath);
-    const existingName = catalogNameForUpstream(catalog, upstream);
-    const name = relativePath === "." ? inferPackageName(repoSource.rootPath) : basename(sourcePath);
-    const catalogName = existingName ?? name;
-    const existing = existingName !== undefined;
-    const nameEntry = catalog.jawfish[name];
-    const conflict =
-      !existing &&
-      nameEntry !== undefined &&
-      !isSameUpstream(nameEntry.upstream, upstream);
-
-    return {
-      catalogName,
-      conflict,
-      existing,
-      name,
-      relativePath,
-      sourcePath,
-      upstream,
-    };
-  });
+  const candidates = skillDirs.map((sourcePath) =>
+    repoSkillCandidate(catalog, repoSource, sourcePath),
+  );
 
   return candidates.sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function repoSkillCandidate(
+  catalog: Catalog,
+  repoSource: RepoSource,
+  sourcePath: string,
+): RepoSkillCandidate {
+  const relativePath =
+    normalizePath(relative(repoSource.rootPath, sourcePath)) || ".";
+  const upstream = repoSkillUpstream(repoSource, relativePath, sourcePath);
+  const existingName = catalogNameForUpstream(catalog, upstream);
+  const name = repoSkillCandidateName(repoSource, relativePath, sourcePath);
+  const nameEntry = catalog.jawfish[name];
+  const existing = existingName !== undefined;
+  const conflict =
+    !existing &&
+    nameEntry !== undefined &&
+    !isSameUpstream(nameEntry.upstream, upstream);
+
+  return {
+    catalogName: existingName ?? name,
+    conflict,
+    existing,
+    name,
+    relativePath,
+    sourcePath,
+    upstream,
+  };
+}
+
+function repoSkillCandidateName(
+  repoSource: RepoSource,
+  relativePath: string,
+  sourcePath: string,
+): string {
+  if (relativePath === ".") {
+    return inferPackageName(repoSource.rootPath);
+  }
+
+  return basename(sourcePath);
 }
 
 async function findSkillDirectories(rootPath: string): Promise<string[]> {
@@ -858,7 +879,11 @@ function repoSkillUpstream(
   sourcePath: string,
 ): string {
   if (repoSource.upstreamKind === "github") {
-    return githubTreeUrl(repoSource.repoUrl, repoSource.ref ?? "HEAD", relativePath);
+    return githubTreeUrl(
+      repoSource.repoUrl,
+      repoSource.ref ?? "HEAD",
+      relativePath,
+    );
   }
 
   if (repoSource.origin !== undefined) {
@@ -871,15 +896,23 @@ function repoSkillUpstream(
 function printRepoSkillCandidates(candidates: RepoSkillCandidate[]): void {
   console.log("Discovered repo skills");
   for (const candidate of candidates) {
-    const state = candidate.conflict
-      ? "conflict"
-      : candidate.existing
-        ? "existing"
-        : "new";
+    const state = repoSkillCandidateState(candidate);
     console.log(
       `${candidate.name} (${candidate.relativePath}) ${state} upstream: ${candidate.upstream}`,
     );
   }
+}
+
+function repoSkillCandidateState(candidate: RepoSkillCandidate): string {
+  if (candidate.conflict) {
+    return "conflict";
+  }
+
+  if (candidate.existing) {
+    return "existing";
+  }
+
+  return "new";
 }
 
 async function selectRepoSkillCandidates(
@@ -896,20 +929,13 @@ async function selectRepoSkillCandidates(
     return candidates.filter((candidate) => !candidate.conflict);
   }
 
-  const initialValues =
-    direct === undefined
-      ? candidates
-          .filter((candidate) => candidate.existing && !candidate.conflict)
-          .map((candidate) => candidate.relativePath)
-      : [direct.relativePath];
+  const initialValues = repoSkillInitialSelections(candidates, direct);
 
   const selected = await multiselect({
     message: "Select repo skills",
     options: candidates.map((candidate) => ({
       hint: candidate.upstream,
-      label: `${candidate.name} (${candidate.relativePath})${
-        candidate.conflict ? " conflict" : candidate.existing ? " existing" : ""
-      }`,
+      label: repoSkillSelectionLabel(candidate),
       value: candidate.relativePath,
     })),
     initialValues,
@@ -923,6 +949,35 @@ async function selectRepoSkillCandidates(
 
   const selectedPaths = new Set(selected);
   return candidates.filter((candidate) => selectedPaths.has(candidate.relativePath));
+}
+
+function repoSkillInitialSelections(
+  candidates: RepoSkillCandidate[],
+  direct: RepoSkillCandidate | undefined,
+): string[] {
+  if (direct !== undefined) {
+    return [direct.relativePath];
+  }
+
+  return candidates
+    .filter((candidate) => candidate.existing && !candidate.conflict)
+    .map((candidate) => candidate.relativePath);
+}
+
+function repoSkillSelectionLabel(candidate: RepoSkillCandidate): string {
+  return `${candidate.name} (${candidate.relativePath})${repoSkillSelectionSuffix(candidate)}`;
+}
+
+function repoSkillSelectionSuffix(candidate: RepoSkillCandidate): string {
+  if (candidate.conflict) {
+    return " conflict";
+  }
+
+  if (candidate.existing) {
+    return " existing";
+  }
+
+  return "";
 }
 
 function directRepoSkillCandidate(
@@ -1057,9 +1112,7 @@ async function acquireGitHubRepoSource(
       .stdout.trim();
   const directRelativePath =
     parsed.directRelativePath ??
-    (parsed.path !== undefined && (await exists(join(tempDir, parsed.path, "SKILL.md")))
-      ? parsed.path
-      : undefined);
+    (await githubTreeSkillRelativePath(tempDir, parsed.path));
 
   return {
     directRelativePath: directRelativePath?.replace(/\/$/u, ""),
@@ -1068,6 +1121,21 @@ async function acquireGitHubRepoSource(
     rootPath: tempDir,
     upstreamKind: "github",
   };
+}
+
+async function githubTreeSkillRelativePath(
+  repoPath: string,
+  path: string | undefined,
+): Promise<string | undefined> {
+  if (path === undefined) {
+    return undefined;
+  }
+
+  if (!(await exists(join(repoPath, path, "SKILL.md")))) {
+    return undefined;
+  }
+
+  return path;
 }
 
 async function acquireLocalRepoSource(
@@ -1080,24 +1148,18 @@ async function acquireLocalRepoSource(
 
   const sourceStat = await stat(localPath);
   const gitCwd = sourceStat.isDirectory() ? localPath : dirname(localPath);
-  const topLevel = await runCommand(
-    "git",
-    ["rev-parse", "--show-toplevel"],
-    gitCwd,
-    false,
-  );
-  if (topLevel.exitCode !== 0 || topLevel.stdout.trim() === "") {
+  const rootPath = await gitTopLevelPath(gitCwd);
+  if (rootPath === undefined) {
     return undefined;
   }
 
-  const rootPath = await realpath(topLevel.stdout.trim());
   const resolvedSourcePath = await realpath(localPath);
   const directRelativePath = await localDirectSkillRelativePath(
     rootPath,
     resolvedSourcePath,
     sourceStat.isDirectory(),
   );
-  const origin = await localRepoOrigin(rootPath);
+  const origin = await gitRemoteOrigin(rootPath);
 
   return {
     directRelativePath,
@@ -1125,17 +1187,6 @@ async function localDirectSkillRelativePath(
   }
 
   return undefined;
-}
-
-async function localRepoOrigin(rootPath: string): Promise<string | undefined> {
-  const origin = await runCommand(
-    "git",
-    ["config", "--get", "remote.origin.url"],
-    rootPath,
-    false,
-  );
-  const value = origin.stdout.trim();
-  return origin.exitCode === 0 && value !== "" ? value : undefined;
 }
 
 async function acquireGitFragmentSource(
@@ -1306,10 +1357,7 @@ function parseGitHubSource(source: string): ParsedGitHubSource | undefined {
   if ((kind === "tree" || kind === "blob") && ref !== undefined) {
     const path = normalizePath(pathParts.join("/"));
     return {
-      directRelativePath:
-        kind === "blob" && basename(path) === "SKILL.md"
-          ? normalizePath(dirname(path))
-          : undefined,
+      directRelativePath: githubBlobSkillRelativePath(kind, path),
       path,
       ref,
       repoUrl,
@@ -1332,12 +1380,26 @@ function parseRawGitHubSource(url: URL): ParsedGitHubSource | undefined {
 
   const path = normalizePath(pathParts.join("/"));
   return {
-    directRelativePath:
-      basename(path) === "SKILL.md" ? normalizePath(dirname(path)) : undefined,
+    directRelativePath: skillFileParentPath(path),
     path,
     ref,
     repoUrl: `https://github.com/${owner}/${repo.replace(/\.git$/u, "")}.git`,
   };
+}
+
+function githubBlobSkillRelativePath(
+  kind: string,
+  path: string,
+): string | undefined {
+  return kind === "blob" ? skillFileParentPath(path) : undefined;
+}
+
+function skillFileParentPath(path: string): string | undefined {
+  if (basename(path) !== "SKILL.md") {
+    return undefined;
+  }
+
+  return normalizePath(dirname(path));
 }
 
 function githubTreeUrl(repoUrl: string, ref: string, relativePath: string): string {
