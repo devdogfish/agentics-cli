@@ -56,6 +56,24 @@ async function writeJawfishConfig(
   );
 }
 
+async function readJsonFile(path: string): Promise<unknown> {
+  return JSON.parse(await readFile(path, "utf8"));
+}
+
+async function assertJsonFile(path: string, expected: unknown): Promise<void> {
+  assert.deepEqual(await readJsonFile(path), expected);
+}
+
+async function assertCodexScopeConfigs(
+  context: CliTestContext,
+  name: string,
+): Promise<void> {
+  const expected = { jawfish: { [name]: { tool: "codex" } } };
+
+  await assertJsonFile(join(context.projectDir, "jawfish.json"), expected);
+  await assertJsonFile(join(context.homeDir, "jawfish.json"), expected);
+}
+
 async function writeIndexedFocusSkill(libraryDir: string): Promise<void> {
   await mkdir(join(libraryDir, "skills", "focus"), { recursive: true });
   await writeFile(
@@ -1211,27 +1229,15 @@ describe("jawfish CLI", () => {
 
     assert.equal(globalResult.exitCode, 0, globalResult.stderr);
     assert.match(globalResult.stdout, /Added renamed-focus to global/);
-    assert.deepEqual(
-      JSON.parse(await readFile(join(libraryDir, "index.json"), "utf8")),
-      {
-        "renamed-focus": {
-          description: "",
-          path: "skills/renamed-focus",
-          type: "skill",
-          upstream: sourceDir,
-        },
+    await assertJsonFile(join(libraryDir, "index.json"), {
+      "renamed-focus": {
+        description: "",
+        path: "skills/renamed-focus",
+        type: "skill",
+        upstream: sourceDir,
       },
-    );
-    assert.deepEqual(
-      JSON.parse(
-        await readFile(join(context.projectDir, "jawfish.json"), "utf8"),
-      ),
-      { jawfish: { "renamed-focus": { tool: "codex" } } },
-    );
-    assert.deepEqual(
-      JSON.parse(await readFile(join(context.homeDir, "jawfish.json"), "utf8")),
-      { jawfish: { "renamed-focus": { tool: "codex" } } },
-    );
+    });
+    await assertCodexScopeConfigs(context, "renamed-focus");
   });
 
   test("imports a URL file parent package, pushes the library, and installs it", async () => {
@@ -1271,17 +1277,14 @@ describe("jawfish CLI", () => {
         ),
         "Use deep work blocks.\n",
       );
-      assert.deepEqual(
-        JSON.parse(await readFile(join(libraryDir, "index.json"), "utf8")),
-        {
-          "upstream-focus": {
-            description: "",
-            path: "skills/upstream-focus",
-            type: "skill",
-            upstream: sourceUrl,
-          },
+      await assertJsonFile(join(libraryDir, "index.json"), {
+        "upstream-focus": {
+          description: "",
+          path: "skills/upstream-focus",
+          type: "skill",
+          upstream: sourceUrl,
         },
-      );
+      });
 
       const localHead = await git(libraryDir, ["rev-parse", "HEAD"]);
       const remoteHead = await git(remoteDir, ["rev-parse", "HEAD"]);
@@ -1316,29 +1319,15 @@ describe("jawfish CLI", () => {
 
       assert.equal(globalResult.exitCode, 0, globalResult.stderr);
       assert.match(globalResult.stdout, /Added renamed-url-focus to global/);
-      assert.deepEqual(
-        JSON.parse(await readFile(join(libraryDir, "index.json"), "utf8")),
-        {
-          "renamed-url-focus": {
-            description: "",
-            path: "skills/renamed-url-focus",
-            type: "skill",
-            upstream: sourceUrl,
-          },
+      await assertJsonFile(join(libraryDir, "index.json"), {
+        "renamed-url-focus": {
+          description: "",
+          path: "skills/renamed-url-focus",
+          type: "skill",
+          upstream: sourceUrl,
         },
-      );
-      assert.deepEqual(
-        JSON.parse(
-          await readFile(join(context.projectDir, "jawfish.json"), "utf8"),
-        ),
-        { jawfish: { "renamed-url-focus": { tool: "codex" } } },
-      );
-      assert.deepEqual(
-        JSON.parse(
-          await readFile(join(context.homeDir, "jawfish.json"), "utf8"),
-        ),
-        { jawfish: { "renamed-url-focus": { tool: "codex" } } },
-      );
+      });
+      await assertCodexScopeConfigs(context, "renamed-url-focus");
     } finally {
       await server.close();
     }
@@ -1445,29 +1434,15 @@ describe("jawfish CLI", () => {
         ),
         "Check tests.\n",
       );
-      assert.deepEqual(
-        JSON.parse(await readFile(join(libraryDir, "index.json"), "utf8")),
-        {
-          "review-agent": {
-            description: "",
-            path: "agents/review-agent",
-            type: "agent",
-            upstream: sourceUrl,
-          },
+      await assertJsonFile(join(libraryDir, "index.json"), {
+        "review-agent": {
+          description: "",
+          path: "agents/review-agent",
+          type: "agent",
+          upstream: sourceUrl,
         },
-      );
-      assert.deepEqual(
-        JSON.parse(
-          await readFile(join(context.projectDir, "jawfish.json"), "utf8"),
-        ),
-        { jawfish: { "review-agent": { tool: "codex" } } },
-      );
-      assert.deepEqual(
-        JSON.parse(
-          await readFile(join(context.homeDir, "jawfish.json"), "utf8"),
-        ),
-        { jawfish: { "review-agent": { tool: "codex" } } },
-      );
+      });
+      await assertCodexScopeConfigs(context, "review-agent");
     } finally {
       await server.close();
     }
