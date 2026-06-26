@@ -1,5 +1,5 @@
 #!/usr/bin/env -S node --experimental-strip-types
-import { cancel, confirm, isCancel, select } from "@clack/prompts";
+import { cancel, confirm, isCancel, multiselect, select } from "@clack/prompts";
 import {
   cp,
   mkdir,
@@ -37,6 +37,7 @@ import { initCommand } from "./init-command.ts";
 import {
   assertCanMaterializePackage,
   installManifestEntry,
+  managedMarkerFile,
   materialize,
   readManifest,
   removeMaterialized,
@@ -98,6 +99,38 @@ interface AcquiredSource {
   packagePath: string;
 }
 
+interface GitHubRepoSource {
+  directRelativePath?: string;
+  ref?: string;
+  repoUrl: string;
+  rootPath: string;
+  upstreamKind: "github";
+}
+
+interface LocalRepoSource {
+  directRelativePath?: string;
+  origin?: string;
+  rootPath: string;
+  upstreamKind: "local";
+}
+
+type RepoSource = GitHubRepoSource | LocalRepoSource;
+
+interface RepoSkillCandidate {
+  catalogName: string;
+  conflict: boolean;
+  existing: boolean;
+  name: string;
+  relativePath: string;
+  sourcePath: string;
+  upstream: string;
+}
+
+interface RepoSkillSelection {
+  imported: boolean;
+  name: string;
+}
+
 interface BulkUpdateFailure {
   details: string;
   message: string;
@@ -128,6 +161,7 @@ const commandSpecs = {
     usage: "jawfish add [options] <name|source>",
     options: [
       "-g, --global    Install globally",
+      "-y, --yes       For repo roots, select all non-conflicting skills",
       "--name <name>   Override imported package name",
       "-h, --help      Show help",
     ],
@@ -148,6 +182,7 @@ const commandSpecs = {
     usage: "jawfish install [options] [name|source]",
     options: [
       "-g, --global    Install global manifest",
+      "-y, --yes       For repo roots, select all non-conflicting skills",
       "--name <name>   Override imported package name",
       "-h, --help      Show help",
     ],
@@ -159,6 +194,7 @@ const commandSpecs = {
     usage: "jawfish i [options] [name|source]",
     options: [
       "-g, --global    Install global manifest",
+      "-y, --yes       For repo roots, select all non-conflicting skills",
       "--name <name>   Override imported package name",
       "-h, --help      Show help",
     ],
@@ -213,10 +249,10 @@ const commandSpecs = {
 type CommandName = keyof typeof commandSpecs;
 const commandNames = Object.keys(commandSpecs) as CommandName[];
 const commandOptions: Record<CommandName, readonly string[]> = {
-  add: ["-g", "--global", "--name", "-h", "--help"],
+  add: ["-g", "--global", "-y", "--yes", "--name", "-h", "--help"],
   init: ["-y", "--yes", "-h", "--help"],
-  install: ["-g", "--global", "--name", "-h", "--help"],
-  i: ["-g", "--global", "--name", "-h", "--help"],
+  install: ["-g", "--global", "-y", "--yes", "--name", "-h", "--help"],
+  i: ["-g", "--global", "-y", "--yes", "--name", "-h", "--help"],
   "import-skills": ["-y", "--yes", "-h", "--help"],
   list: ["--type", "--installed", "--raw", "-h", "--help"],
   update: ["-g", "--global", "-F", "--force", "-h", "--help"],
@@ -332,6 +368,22 @@ async function addCommand(args: ParsedArgs): Promise<number> {
 
   if (!(await isImportSource(source))) {
     throw new Error(`Unknown agentic: ${source}`);
+  }
+
+  const repoSource = await acquireRepoSource(source);
+  if (repoSource !== undefined) {
+    const selected = await importAndInstallRepoSkills(
+      agenticsRepoDir,
+      catalog,
+      repoSource,
+      args,
+      scope,
+      config,
+    );
+    if (selected.length > 0) {
+      console.log(`Added ${selected.map((item) => item.name).join(", ")} to ${scope}`);
+    }
+    return 0;
   }
 
   const imported = await importPackage(agenticsRepoDir, catalog, source, args.name);
@@ -642,6 +694,261 @@ async function importPackage(
   return { imported: true, name };
 }
 
+async function importAndInstallRepoSkills(
+  agenticsRepoDir: string,
+  catalog: Catalog,
+  repoSource: RepoSource,
+  args: ParsedArgs,
+  scope: InstallScope,
+  config: JawfishConfig,
+): Promise<RepoSkillSelection[]> {
+  const candidates = await repoSkillCandidates(catalog, repoSource);
+  if (candidates.length === 0) {
+    throw new Error(`No skills found in repository source: ${repoSource.rootPath}`);
+  }
+
+  printRepoSkillCandidates(candidates);
+  const selectedCandidates = await selectRepoSkillCandidates(
+    candidates,
+    repoSource,
+    args.yes,
+  );
+  if (selectedCandidates.length === 0) {
+    console.log("No repo skills selected");
+    return [];
+  }
+
+  assertRepoSkillSelection(selectedCandidates);
+
+  const selections: RepoSkillSelection[] = [];
+  let importedCount = 0;
+  for (const candidate of selectedCandidates) {
+    const imported = await importRepoSkillCandidate(
+      agenticsRepoDir,
+      catalog,
+      candidate,
+      args.name,
+      selectedCandidates.length,
+    );
+    if (imported.imported) {
+      importedCount += 1;
+    }
+    selections.push(imported);
+  }
+
+  if (importedCount > 0) {
+    await writeCatalog(agenticsRepoDir, catalog);
+    const names = selections.map((selection) => selection.name).join(", ");
+    if (!(await pushAgenticsRepoChanges(agenticsRepoDir, `add ${names}`))) {
+      return [];
+    }
+  }
+
+  for (const selection of selections) {
+    await installOne(agenticsRepoDir, catalog, selection.name, scope, config);
+  }
+
+  return selections;
+}
+
+async function importRepoSkillCandidate(
+  agenticsRepoDir: string,
+  catalog: Catalog,
+  candidate: RepoSkillCandidate,
+  nameOverride: string | undefined,
+  selectionCount: number,
+): Promise<RepoSkillSelection> {
+  if (candidate.existing) {
+    return { imported: false, name: candidate.catalogName };
+  }
+
+  if (nameOverride !== undefined && selectionCount !== 1) {
+    throw new Error("--name can only be used when one repo skill is selected");
+  }
+
+  const name = nameOverride ?? candidate.name;
+  const packagePath = join(typeFolder("skill"), name);
+  const destination = resolveInside(agenticsRepoDir, packagePath);
+
+  if (catalogHasAgentic(catalog, name)) {
+    const existing = catalog.jawfish[name];
+    if (existing !== undefined && isSameUpstream(existing.upstream, candidate.upstream)) {
+      return { imported: false, name };
+    }
+
+    throw new Error(`Agentic already exists in catalog: ${name}`);
+  }
+
+  await rm(destination, { force: true, recursive: true });
+  await mkdir(dirname(destination), { recursive: true });
+  await cp(candidate.sourcePath, destination, { recursive: true });
+  await rm(join(destination, managedMarkerFile), { force: true });
+
+  catalog.jawfish[name] = {
+    description: "",
+    path: packagePath,
+    type: "skill",
+    upstream: candidate.upstream,
+  };
+
+  return { imported: true, name };
+}
+
+async function repoSkillCandidates(
+  catalog: Catalog,
+  repoSource: RepoSource,
+): Promise<RepoSkillCandidate[]> {
+  const skillDirs = await findSkillDirectories(repoSource.rootPath);
+  const candidates = skillDirs.map((sourcePath) => {
+    const relativePath = normalizePath(relative(repoSource.rootPath, sourcePath)) || ".";
+    const upstream = repoSkillUpstream(repoSource, relativePath, sourcePath);
+    const existingName = catalogNameForUpstream(catalog, upstream);
+    const name = relativePath === "." ? inferPackageName(repoSource.rootPath) : basename(sourcePath);
+    const catalogName = existingName ?? name;
+    const existing = existingName !== undefined;
+    const nameEntry = catalog.jawfish[name];
+    const conflict =
+      !existing &&
+      nameEntry !== undefined &&
+      !isSameUpstream(nameEntry.upstream, upstream);
+
+    return {
+      catalogName,
+      conflict,
+      existing,
+      name,
+      relativePath,
+      sourcePath,
+      upstream,
+    };
+  });
+
+  return candidates.sort((left, right) => left.name.localeCompare(right.name));
+}
+
+async function findSkillDirectories(rootPath: string): Promise<string[]> {
+  const found: string[] = [];
+
+  async function visit(path: string): Promise<void> {
+    const entries = await readdir(path, { withFileTypes: true });
+    if (entries.some((entry) => entry.isFile() && entry.name === "SKILL.md")) {
+      found.push(path);
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory() || shouldSkipRepoScanEntry(entry.name)) {
+        continue;
+      }
+
+      await visit(join(path, entry.name));
+    }
+  }
+
+  await visit(rootPath);
+  return found;
+}
+
+function shouldSkipRepoScanEntry(name: string): boolean {
+  return name === ".git" || name === "node_modules" || name === "dist";
+}
+
+function repoSkillUpstream(
+  repoSource: RepoSource,
+  relativePath: string,
+  sourcePath: string,
+): string {
+  if (repoSource.upstreamKind === "github") {
+    return githubTreeUrl(repoSource.repoUrl, repoSource.ref ?? "HEAD", relativePath);
+  }
+
+  if (repoSource.origin !== undefined) {
+    return `${repoSource.origin}#${relativePath}`;
+  }
+
+  return sourcePath;
+}
+
+function printRepoSkillCandidates(candidates: RepoSkillCandidate[]): void {
+  console.log("Discovered repo skills");
+  for (const candidate of candidates) {
+    const state = candidate.conflict
+      ? "conflict"
+      : candidate.existing
+        ? "existing"
+        : "new";
+    console.log(
+      `${candidate.name} (${candidate.relativePath}) ${state} upstream: ${candidate.upstream}`,
+    );
+  }
+}
+
+async function selectRepoSkillCandidates(
+  candidates: RepoSkillCandidate[],
+  repoSource: RepoSource,
+  yes: boolean,
+): Promise<RepoSkillCandidate[]> {
+  const direct = directRepoSkillCandidate(candidates, repoSource);
+  if (yes) {
+    if (direct !== undefined) {
+      return [direct];
+    }
+
+    return candidates.filter((candidate) => !candidate.conflict);
+  }
+
+  const initialValues =
+    direct === undefined
+      ? candidates
+          .filter((candidate) => candidate.existing && !candidate.conflict)
+          .map((candidate) => candidate.relativePath)
+      : [direct.relativePath];
+
+  const selected = await multiselect({
+    message: "Select repo skills",
+    options: candidates.map((candidate) => ({
+      hint: candidate.upstream,
+      label: `${candidate.name} (${candidate.relativePath})${
+        candidate.conflict ? " conflict" : candidate.existing ? " existing" : ""
+      }`,
+      value: candidate.relativePath,
+    })),
+    initialValues,
+    required: false,
+  });
+
+  if (isCancel(selected)) {
+    cancel("Repo skill selection cancelled");
+    throw new Error("Repo skill selection cancelled");
+  }
+
+  const selectedPaths = new Set(selected);
+  return candidates.filter((candidate) => selectedPaths.has(candidate.relativePath));
+}
+
+function directRepoSkillCandidate(
+  candidates: RepoSkillCandidate[],
+  repoSource: RepoSource,
+): RepoSkillCandidate | undefined {
+  if (repoSource.directRelativePath === undefined) {
+    return undefined;
+  }
+
+  return candidates.find(
+    (candidate) => candidate.relativePath === repoSource.directRelativePath,
+  );
+}
+
+function assertRepoSkillSelection(candidates: RepoSkillCandidate[]): void {
+  const conflicts = candidates
+    .filter((candidate) => candidate.conflict)
+    .map((candidate) => candidate.name);
+  if (conflicts.length > 0) {
+    throw new Error(
+      `Repo skill name conflicts: ${conflicts.join(", ")}`,
+    );
+  }
+}
+
 function catalogNameForUpstream(
   catalog: Catalog,
   source: string,
@@ -686,6 +993,23 @@ async function confirmImportSkills(count: number): Promise<boolean> {
 }
 
 async function acquireSource(source: string): Promise<AcquiredSource> {
+  const fragmentSource = await acquireGitFragmentSource(source);
+  if (fragmentSource !== undefined) {
+    return fragmentSource;
+  }
+
+  const repoSource = await acquireRepoSource(source);
+  if (
+    repoSource !== undefined &&
+    repoSource.directRelativePath !== undefined
+  ) {
+    const packagePath = join(repoSource.rootPath, repoSource.directRelativePath);
+    return {
+      inferredName: inferPackageName(packagePath),
+      packagePath,
+    };
+  }
+
   return isUrl(source) ? acquireUrlSource(source) : acquireLocalSource(source);
 }
 
@@ -694,7 +1018,165 @@ async function isImportSource(source: string): Promise<boolean> {
     return true;
   }
 
+  const fragment = splitGitFragmentSource(source);
+  if (fragment !== undefined) {
+    return exists(resolve(process.cwd(), fragment.source));
+  }
+
   return exists(resolve(process.cwd(), source));
+}
+
+async function acquireRepoSource(source: string): Promise<RepoSource | undefined> {
+  const github = parseGitHubSource(source);
+  if (github !== undefined) {
+    return acquireGitHubRepoSource(github);
+  }
+
+  return acquireLocalRepoSource(source);
+}
+
+interface ParsedGitHubSource {
+  directRelativePath?: string;
+  path?: string;
+  ref?: string;
+  repoUrl: string;
+}
+
+async function acquireGitHubRepoSource(
+  parsed: ParsedGitHubSource,
+): Promise<GitHubRepoSource> {
+  const tempDir = await mkdtemp(join(tmpdir(), "jawfish-repo-"));
+  await runCommand("git", ["clone", "--quiet", parsed.repoUrl, tempDir], process.cwd());
+  if (parsed.ref !== undefined) {
+    await runCommand("git", ["checkout", "--quiet", parsed.ref], tempDir);
+  }
+
+  const ref =
+    parsed.ref ??
+    (await runCommand("git", ["rev-parse", "--abbrev-ref", "HEAD"], tempDir))
+      .stdout.trim();
+  const directRelativePath =
+    parsed.directRelativePath ??
+    (parsed.path !== undefined && (await exists(join(tempDir, parsed.path, "SKILL.md")))
+      ? parsed.path
+      : undefined);
+
+  return {
+    directRelativePath: directRelativePath?.replace(/\/$/u, ""),
+    ref,
+    repoUrl: parsed.repoUrl.replace(/\.git$/u, ""),
+    rootPath: tempDir,
+    upstreamKind: "github",
+  };
+}
+
+async function acquireLocalRepoSource(
+  source: string,
+): Promise<LocalRepoSource | undefined> {
+  const localPath = resolve(process.cwd(), source);
+  if (!(await exists(localPath))) {
+    return undefined;
+  }
+
+  const sourceStat = await stat(localPath);
+  const gitCwd = sourceStat.isDirectory() ? localPath : dirname(localPath);
+  const topLevel = await runCommand(
+    "git",
+    ["rev-parse", "--show-toplevel"],
+    gitCwd,
+    false,
+  );
+  if (topLevel.exitCode !== 0 || topLevel.stdout.trim() === "") {
+    return undefined;
+  }
+
+  const rootPath = await realpath(topLevel.stdout.trim());
+  const resolvedSourcePath = await realpath(localPath);
+  const directRelativePath = await localDirectSkillRelativePath(
+    rootPath,
+    resolvedSourcePath,
+    sourceStat.isDirectory(),
+  );
+  const origin = await localRepoOrigin(rootPath);
+
+  return {
+    directRelativePath,
+    origin,
+    rootPath,
+    upstreamKind: "local",
+  };
+}
+
+async function localDirectSkillRelativePath(
+  rootPath: string,
+  sourcePath: string,
+  sourceIsDirectory: boolean,
+): Promise<string | undefined> {
+  if (!sourceIsDirectory && basename(sourcePath) === "SKILL.md") {
+    return normalizePath(relative(rootPath, dirname(sourcePath)));
+  }
+
+  if (
+    sourceIsDirectory &&
+    resolve(sourcePath) !== resolve(rootPath) &&
+    (await exists(join(sourcePath, "SKILL.md")))
+  ) {
+    return normalizePath(relative(rootPath, sourcePath));
+  }
+
+  return undefined;
+}
+
+async function localRepoOrigin(rootPath: string): Promise<string | undefined> {
+  const origin = await runCommand(
+    "git",
+    ["config", "--get", "remote.origin.url"],
+    rootPath,
+    false,
+  );
+  const value = origin.stdout.trim();
+  return origin.exitCode === 0 && value !== "" ? value : undefined;
+}
+
+async function acquireGitFragmentSource(
+  source: string,
+): Promise<AcquiredSource | undefined> {
+  const fragment = splitGitFragmentSource(source);
+  if (fragment === undefined) {
+    return undefined;
+  }
+
+  const tempDir = await mkdtemp(join(tmpdir(), "jawfish-repo-"));
+  await runCommand("git", ["clone", "--quiet", fragment.source, tempDir], process.cwd());
+  const packagePath = join(tempDir, fragment.relativePath);
+  return {
+    inferredName: inferPackageName(packagePath),
+    packagePath,
+  };
+}
+
+interface GitFragmentSource {
+  relativePath: string;
+  source: string;
+}
+
+function splitGitFragmentSource(source: string): GitFragmentSource | undefined {
+  if (isUrl(source)) {
+    return undefined;
+  }
+
+  const hashIndex = source.indexOf("#");
+  if (hashIndex < 0) {
+    return undefined;
+  }
+
+  const base = source.slice(0, hashIndex);
+  const relativePath = source.slice(hashIndex + 1);
+  if (base === "" || relativePath === "") {
+    return undefined;
+  }
+
+  return { relativePath, source: base };
 }
 
 async function acquireLocalSource(source: string): Promise<AcquiredSource> {
@@ -789,6 +1271,83 @@ export function normalizeSourceUrl(source: string): string {
 
   const [owner, repo, , branch, ...path] = parts;
   return `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${path.join("/")}`;
+}
+
+function parseGitHubSource(source: string): ParsedGitHubSource | undefined {
+  if (!isUrl(source)) {
+    return undefined;
+  }
+
+  const url = new URL(source);
+  if (url.hostname === "raw.githubusercontent.com") {
+    return parseRawGitHubSource(url);
+  }
+
+  if (url.hostname !== "github.com") {
+    return undefined;
+  }
+
+  const parts = url.pathname.split("/").filter(Boolean);
+  if (parts.length < 2) {
+    return undefined;
+  }
+
+  const [owner, rawRepo, kind, ref, ...pathParts] = parts;
+  if (owner === undefined || rawRepo === undefined) {
+    return undefined;
+  }
+
+  const repo = rawRepo.replace(/\.git$/u, "");
+  const repoUrl = `https://github.com/${owner}/${repo}.git`;
+  if (kind === undefined) {
+    return { repoUrl };
+  }
+
+  if ((kind === "tree" || kind === "blob") && ref !== undefined) {
+    const path = normalizePath(pathParts.join("/"));
+    return {
+      directRelativePath:
+        kind === "blob" && basename(path) === "SKILL.md"
+          ? normalizePath(dirname(path))
+          : undefined,
+      path,
+      ref,
+      repoUrl,
+    };
+  }
+
+  return undefined;
+}
+
+function parseRawGitHubSource(url: URL): ParsedGitHubSource | undefined {
+  const parts = url.pathname.split("/").filter(Boolean);
+  if (parts.length < 4) {
+    return undefined;
+  }
+
+  const [owner, repo, ref, ...pathParts] = parts;
+  if (owner === undefined || repo === undefined || ref === undefined) {
+    return undefined;
+  }
+
+  const path = normalizePath(pathParts.join("/"));
+  return {
+    directRelativePath:
+      basename(path) === "SKILL.md" ? normalizePath(dirname(path)) : undefined,
+    path,
+    ref,
+    repoUrl: `https://github.com/${owner}/${repo.replace(/\.git$/u, "")}.git`,
+  };
+}
+
+function githubTreeUrl(repoUrl: string, ref: string, relativePath: string): string {
+  const cleanRepoUrl = repoUrl.replace(/\.git$/u, "");
+  const cleanRelativePath = relativePath === "." ? "" : `/${relativePath}`;
+  return `${cleanRepoUrl}/tree/${ref}${cleanRelativePath}`;
+}
+
+function normalizePath(path: string): string {
+  return path.replaceAll("\\", "/").replace(/^\.\//u, "");
 }
 
 function isDirectoryListing(response: UrlResponse): boolean {

@@ -1,5 +1,5 @@
-import { cp, mkdir, readdir, rm } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { cp, mkdir, readdir, realpath, rm } from "node:fs/promises";
+import { dirname, join, relative } from "node:path";
 import { writeCatalog, type Catalog } from "./catalog.ts";
 import { exists } from "./files.ts";
 import {
@@ -13,6 +13,7 @@ import {
 import { pushAgenticsRepoChanges } from "./agentics-repo.ts";
 import { toolPaths } from "./config.ts";
 import { destinationSpec, typeFolder } from "./tool-adapters.ts";
+import { runCommand } from "./process.ts";
 
 interface PathOptions {
   cwd?: string;
@@ -22,6 +23,7 @@ interface PathOptions {
 export interface DiscoveredSkill {
   name: string;
   path: string;
+  upstream?: string;
 }
 
 export interface ImportSkillsPlan {
@@ -65,7 +67,11 @@ export async function planSkillImport(
       continue;
     }
 
-    plan.imported.push({ name: entry.name, path: sourcePath });
+    plan.imported.push({
+      name: entry.name,
+      path: sourcePath,
+      upstream: await inferredLocalGitUpstream(sourcePath),
+    });
   }
 
   plan.conflicts.sort();
@@ -110,6 +116,7 @@ export async function applySkillImport(
       description: "",
       path: packagePath,
       type: "skill",
+      ...(skill.upstream === undefined ? {} : { upstream: skill.upstream }),
     };
     manifest.jawfish[skill.name] = { tool: provider };
     await adoptGlobalSkill(skill, provider);
@@ -185,4 +192,32 @@ async function adoptGlobalSkill(
     tool: provider,
     type: "skill",
   });
+}
+
+async function inferredLocalGitUpstream(
+  sourcePath: string,
+): Promise<string | undefined> {
+  const topLevel = await runCommand(
+    "git",
+    ["rev-parse", "--show-toplevel"],
+    sourcePath,
+    false,
+  );
+  if (topLevel.exitCode !== 0 || topLevel.stdout.trim() === "") {
+    return undefined;
+  }
+
+  const rootPath = await realpath(topLevel.stdout.trim());
+  const origin = await runCommand(
+    "git",
+    ["config", "--get", "remote.origin.url"],
+    rootPath,
+    false,
+  );
+  const originUrl = origin.stdout.trim();
+  if (origin.exitCode !== 0 || originUrl === "") {
+    return undefined;
+  }
+
+  return `${originUrl}#${relative(rootPath, sourcePath).replaceAll("\\", "/")}`;
 }

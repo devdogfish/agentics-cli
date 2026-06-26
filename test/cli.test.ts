@@ -594,6 +594,43 @@ describe("jawfish CLI", () => {
     );
   });
 
+  test("imports provider skills with inferred git upstream", async () => {
+    const context = await setup();
+    const agenticsRepoDir = join(context.rootDir, "agentics");
+    const codexHome = join(context.rootDir, "codex-home");
+    const skillRemoteDir = join(context.rootDir, "codex-home.git");
+
+    await createGitRepository(agenticsRepoDir);
+    await createGitRepository(codexHome);
+    await createBareRemote(skillRemoteDir);
+    await git(codexHome, ["remote", "add", "origin", skillRemoteDir]);
+    await mkdir(join(codexHome, "skills", "focus"), { recursive: true });
+    await writeFile(join(codexHome, "skills", "focus", "SKILL.md"), "# Focus\n");
+    await git(codexHome, ["add", "."]);
+    await git(codexHome, ["commit", "-m", "add focus skill"]);
+    await git(codexHome, ["push", "-u", "origin", "HEAD"]);
+    await writeJawfishConfig(context, agenticsRepoDir);
+
+    const result = await runJawfish(
+      context,
+      ["import-skills", "codex", "--yes"],
+      { env: { CODEX_HOME: codexHome } },
+    );
+
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.deepEqual(
+      JSON.parse(await readFile(join(agenticsRepoDir, "index.json"), "utf8")),
+      {
+        focus: {
+          description: "",
+          path: "skills/focus",
+          type: "skill",
+          upstream: `${skillRemoteDir}#skills/focus`,
+        },
+      },
+    );
+  });
+
   test("imports global skills from every supported provider", async () => {
     for (const tool of defaultSupportedTools) {
       const context = await setup();
@@ -1246,6 +1283,128 @@ describe("jawfish CLI", () => {
         },
       },
     );
+  });
+
+  test("adds all non-conflicting skills from a local repo root with yes", async () => {
+    const context = await setup();
+    const agenticsRepoDir = join(context.rootDir, "agentics");
+    const sourceRepoDir = join(context.rootDir, "skills-source");
+    const sourceRemoteDir = join(context.rootDir, "skills-source.git");
+
+    await createGitRepository(agenticsRepoDir);
+    await createGitRepository(sourceRepoDir);
+    await createBareRemote(sourceRemoteDir);
+    await mkdir(join(sourceRepoDir, "skills", "focus"), { recursive: true });
+    await mkdir(join(sourceRepoDir, "nested", "plan"), { recursive: true });
+    await writeFile(join(sourceRepoDir, "skills", "focus", "SKILL.md"), "# Focus\n");
+    await writeFile(join(sourceRepoDir, "nested", "plan", "SKILL.md"), "# Plan\n");
+    await git(sourceRepoDir, ["add", "."]);
+    await git(sourceRepoDir, ["commit", "-m", "add skills"]);
+    await git(sourceRepoDir, ["remote", "add", "origin", sourceRemoteDir]);
+    await git(sourceRepoDir, ["push", "-u", "origin", "HEAD"]);
+    await writeJawfishConfig(context, agenticsRepoDir);
+
+    const result = await runJawfish(context, ["add", "--yes", sourceRepoDir]);
+
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.match(result.stdout, /Added focus, plan to project/);
+    assert.equal(
+      await readFile(
+        join(context.projectDir, ".codex", "skills", "focus", "SKILL.md"),
+        "utf8",
+      ),
+      "# Focus\n",
+    );
+    assert.equal(
+      await readFile(
+        join(context.projectDir, ".codex", "skills", "plan", "SKILL.md"),
+        "utf8",
+      ),
+      "# Plan\n",
+    );
+    await assertJsonFile(join(agenticsRepoDir, "index.json"), {
+      focus: {
+        description: "",
+        path: "skills/focus",
+        type: "skill",
+        upstream: `${sourceRemoteDir}#skills/focus`,
+      },
+      plan: {
+        description: "",
+        path: "skills/plan",
+        type: "skill",
+        upstream: `${sourceRemoteDir}#nested/plan`,
+      },
+    });
+    await assertJsonFile(join(context.projectDir, "jawfish.json"), {
+      jawfish: {
+        focus: { tool: "codex" },
+        plan: { tool: "codex" },
+      },
+    });
+
+    await writeFile(join(sourceRepoDir, "skills", "focus", "SKILL.md"), "# New Focus\n");
+    await git(sourceRepoDir, ["add", "."]);
+    await git(sourceRepoDir, ["commit", "-m", "update focus"]);
+    await git(sourceRepoDir, ["push"]);
+
+    const update = await runJawfish(context, ["update", "focus"]);
+
+    assert.equal(update.exitCode, 0, update.stderr);
+    assert.equal(
+      await readFile(join(agenticsRepoDir, "skills", "focus", "SKILL.md"), "utf8"),
+      "# New Focus\n",
+    );
+    assert.equal(
+      await readFile(
+        join(context.projectDir, ".codex", "skills", "focus", "SKILL.md"),
+        "utf8",
+      ),
+      "# New Focus\n",
+    );
+  });
+
+  test("adds only the linked local repo skill with yes", async () => {
+    const context = await setup();
+    const agenticsRepoDir = join(context.rootDir, "agentics");
+    const sourceRepoDir = join(context.rootDir, "skills-source");
+
+    await createGitRepository(agenticsRepoDir);
+    await createGitRepository(sourceRepoDir);
+    await mkdir(join(sourceRepoDir, "skills", "focus"), { recursive: true });
+    await mkdir(join(sourceRepoDir, "skills", "plan"), { recursive: true });
+    await writeFile(join(sourceRepoDir, "skills", "focus", "SKILL.md"), "# Focus\n");
+    await writeFile(join(sourceRepoDir, "skills", "plan", "SKILL.md"), "# Plan\n");
+    await git(sourceRepoDir, ["add", "."]);
+    await git(sourceRepoDir, ["commit", "-m", "add skills"]);
+    await writeJawfishConfig(context, agenticsRepoDir);
+
+    const result = await runJawfish(context, [
+      "add",
+      "--yes",
+      join(sourceRepoDir, "skills", "focus", "SKILL.md"),
+    ]);
+
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.match(result.stdout, /Added focus to project/);
+    assert.equal(
+      await readFile(
+        join(context.projectDir, ".codex", "skills", "focus", "SKILL.md"),
+        "utf8",
+      ),
+      "# Focus\n",
+    );
+    await assertMissingFile(
+      join(context.projectDir, ".codex", "skills", "plan", "SKILL.md"),
+    );
+    await assertJsonFile(join(agenticsRepoDir, "index.json"), {
+      focus: {
+        description: "",
+        path: "skills/focus",
+        type: "skill",
+        upstream: join(sourceRepoDir, "skills", "focus"),
+      },
+    });
   });
 
   test("reuses a renamed local source when installing another scope", async () => {
@@ -3471,17 +3630,6 @@ describe("jawfish CLI", () => {
       option: string;
       usage: RegExp;
     }> = [
-      {
-        args: ["add", "--yes", "focus"],
-        option: "--yes",
-        usage: /Usage: jawfish add/,
-      },
-      {
-        args: ["install", "--yes"],
-        option: "--yes",
-        usage: /Usage: jawfish install/,
-      },
-      { args: ["i", "--yes"], option: "--yes", usage: /Usage: jawfish i/ },
       {
         args: ["import-skills", "--raw", "codex"],
         option: "--raw",
