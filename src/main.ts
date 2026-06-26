@@ -12,7 +12,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import {
   basename,
   dirname,
@@ -91,8 +91,11 @@ interface ParsedArgs {
   force: boolean;
   global: boolean;
   help: boolean;
+  installed?: string;
   name?: string;
   positionals: string[];
+  raw: boolean;
+  type?: string;
   yes: boolean;
 }
 
@@ -192,6 +195,17 @@ const commandSpecs = {
       "-h, --help     Show help",
     ],
   },
+  list: {
+    description: "List available jawfish in the content library.",
+    summary: "List available jawfish",
+    usage: "jawfish list [options]",
+    options: [
+      "--type <type>           Filter by skill, agent, or prompt",
+      "--installed <status>    Filter by project, global, both, none, or any",
+      "--raw                   Print JSON",
+      "-h, --help              Show help",
+    ],
+  },
   update: {
     description: "Refresh one or all upstream-backed jawfish.",
     summary: "Update upstream-backed jawfish",
@@ -273,7 +287,7 @@ export async function run(argv: string[]): Promise<number> {
       return 1;
     }
 
-    const parsed = parseArgs(args);
+    const parsed = parseArgs(args, command);
     if (parsed.help) {
       printCommandHelp(command);
       return 0;
@@ -294,6 +308,8 @@ export async function run(argv: string[]): Promise<number> {
           : await installCommand(parsed);
       case "import-skills":
         return await importSkillsCommand(parsed);
+      case "list":
+        return await listCommand(parsed);
       case "remove":
         return await removeCommand(parsed);
       case "update":
@@ -384,6 +400,63 @@ async function installCommand(args: ParsedArgs): Promise<number> {
   }
 
   console.log(`Installed ${names.length} jawfish to ${scope}`);
+  return 0;
+}
+
+async function listCommand(args: ParsedArgs): Promise<number> {
+  if (
+    args.force ||
+    args.global ||
+    args.name !== undefined ||
+    args.positionals.length > 0 ||
+    args.yes
+  ) {
+    console.error("Usage: jawfish list [options]");
+    return 1;
+  }
+
+  const type = args.type;
+  if (type !== undefined && !isAgenticType(type)) {
+    console.error(
+      `Unsupported type: ${type}. Supported types: ${agenticTypes.join(", ")}`,
+    );
+    return 1;
+  }
+
+  const installed = args.installed;
+  if (installed !== undefined && !isInstalledFilter(installed)) {
+    console.error(
+      `Unsupported installed filter: ${installed}. Supported filters: ${installedFilters.join(", ")}`,
+    );
+    return 1;
+  }
+
+  const config = await loadConfig({ promptForMissingDefaultTool: false });
+  const libraryDir = await resolveContentLibrary(config);
+  await syncLibrary(libraryDir);
+  const catalog = await readCatalog(libraryDir);
+  const [projectManifest, globalManifest] = await Promise.all([
+    readManifest("project"),
+    readManifest("global"),
+  ]);
+  const entries = catalogEntriesForList(
+    libraryDir,
+    catalog,
+    type,
+    projectManifest,
+    globalManifest,
+  ).filter(
+    (entry) =>
+      installed === undefined ||
+      matchesInstalledFilter(entry.installed, installed),
+  );
+
+  if (args.raw) {
+    console.log(JSON.stringify(entries, null, 2));
+    return 0;
+  }
+
+  console.log(formatCatalogTable(entries));
   return 0;
 }
 
@@ -1498,6 +1571,138 @@ function printCatalogEntry(
   }
 }
 
+interface ListCatalogEntry {
+  description: string;
+  installed: InstalledStatus;
+  name: string;
+  path: string;
+  type: AgenticType;
+}
+
+type InstalledStatus = "project" | "global" | "both" | "-";
+const installedFilters = ["project", "global", "both", "none", "any"] as const;
+type InstalledFilter = (typeof installedFilters)[number];
+
+function catalogEntriesForList(
+  libraryDir: string,
+  catalog: Catalog,
+  type: AgenticType | undefined,
+  projectManifest: Manifest,
+  globalManifest: Manifest,
+): ListCatalogEntry[] {
+  return Object.entries(catalog.jawfish)
+    .filter(([, entry]) => type === undefined || entry.type === type)
+    .map(([name, entry]) => ({
+      description: entry.description,
+      installed: installedStatus(name, projectManifest, globalManifest),
+      name,
+      path: compactHomePath(resolveInside(libraryDir, entry.path)),
+      type: entry.type,
+    }))
+    .sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function installedStatus(
+  name: string,
+  projectManifest: Manifest,
+  globalManifest: Manifest,
+): InstalledStatus {
+  const project = projectManifest.jawfish[name] !== undefined;
+  const global = globalManifest.jawfish[name] !== undefined;
+
+  if (project && global) {
+    return "both";
+  }
+
+  if (project) {
+    return "project";
+  }
+
+  if (global) {
+    return "global";
+  }
+
+  return "-";
+}
+
+function isInstalledFilter(value: string): value is InstalledFilter {
+  return installedFilters.includes(value as InstalledFilter);
+}
+
+function matchesInstalledFilter(
+  status: InstalledStatus,
+  filter: InstalledFilter,
+): boolean {
+  switch (filter) {
+    case "project":
+      return status === "project" || status === "both";
+    case "global":
+      return status === "global" || status === "both";
+    case "both":
+      return status === "both";
+    case "none":
+      return status === "-";
+    case "any":
+      return status !== "-";
+  }
+}
+
+function compactHomePath(path: string): string {
+  const home = resolve(homedir());
+  const resolved = resolve(path);
+  const pathRelativeToHome = relative(home, resolved);
+
+  if (pathRelativeToHome === "") {
+    return "~";
+  }
+
+  if (
+    !pathRelativeToHome.startsWith("..") &&
+    !isAbsolute(pathRelativeToHome)
+  ) {
+    return join("~", pathRelativeToHome);
+  }
+
+  return resolved;
+}
+
+function formatCatalogTable(entries: ListCatalogEntry[]): string {
+  const columns = ["name", "type", "installed", "description"] as const;
+  const widths = columns.map((column) =>
+    Math.max(
+      column.length,
+      ...entries.map((entry) => String(entry[column]).length),
+    ),
+  );
+  const top = tableBorder("┌", "┬", "┐", widths);
+  const middle = tableBorder("├", "┼", "┤", widths);
+  const bottom = tableBorder("└", "┴", "┘", widths);
+  const header = tableRow([...columns], widths);
+  const rows = entries.map((entry) =>
+    tableRow(
+      [entry.name, entry.type, entry.installed, entry.description],
+      widths,
+    ),
+  );
+
+  return [top, header, middle, ...rows, bottom].join("\n");
+}
+
+function tableBorder(
+  left: string,
+  joiner: string,
+  right: string,
+  widths: number[],
+): string {
+  return `${left}${widths.map((width) => "─".repeat(width + 2)).join(joiner)}${right}`;
+}
+
+function tableRow(values: string[], widths: number[]): string {
+  return `│ ${values
+    .map((value, index) => value.padEnd(widths[index]))
+    .join(" │ ")} │`;
+}
+
 async function readManifest(scope: InstallScope): Promise<Manifest> {
   const path = manifestPath(scope);
   if (!(await exists(path))) {
@@ -1601,12 +1806,13 @@ async function isBareRepository(path: string): Promise<boolean> {
   return result.exitCode === 0 && result.stdout.trim() === "true";
 }
 
-function parseArgs(args: string[]): ParsedArgs {
+function parseArgs(args: string[], command: CommandName): ParsedArgs {
   const parsed: ParsedArgs = {
     force: false,
     global: false,
     help: false,
     positionals: [],
+    raw: false,
     yes: false,
   };
 
@@ -1629,6 +1835,14 @@ function parseArgs(args: string[]): ParsedArgs {
       case "--yes":
         parsed.yes = true;
         break;
+      case "--raw":
+        if (command !== "list") {
+          parsed.positionals.push(arg);
+          break;
+        }
+
+        parsed.raw = true;
+        break;
       case "--name": {
         const name = args[index + 1];
         if (name === undefined) {
@@ -1636,6 +1850,36 @@ function parseArgs(args: string[]): ParsedArgs {
         }
 
         parsed.name = name;
+        index += 1;
+        break;
+      }
+      case "--type": {
+        if (command !== "list") {
+          parsed.positionals.push(arg);
+          break;
+        }
+
+        const type = args[index + 1];
+        if (type === undefined) {
+          throw new Error("--type requires a value");
+        }
+
+        parsed.type = type;
+        index += 1;
+        break;
+      }
+      case "--installed": {
+        if (command !== "list") {
+          parsed.positionals.push(arg);
+          break;
+        }
+
+        const installed = args[index + 1];
+        if (installed === undefined) {
+          throw new Error("--installed requires a value");
+        }
+
+        parsed.installed = installed;
         index += 1;
         break;
       }

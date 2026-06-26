@@ -1570,6 +1570,7 @@ describe("jawfish CLI", () => {
       "import-skills",
       "install",
       "i",
+      "list",
       "update",
       "upgrade",
       "remove",
@@ -1579,6 +1580,259 @@ describe("jawfish CLI", () => {
       assert.equal(result.exitCode, 0);
       assert.match(result.stdout, new RegExp(`Usage: jawfish ${command}`));
     }
+  });
+
+  test("lists catalog entries as a table or JSON", async () => {
+    const context = await setup();
+    const libraryDir = join(context.homeDir, "content-library");
+
+    await writeJawfishConfig(context, libraryDir);
+    await mkdir(join(libraryDir, "skills", "focus"), { recursive: true });
+    await mkdir(join(libraryDir, "skills", "handoff"), { recursive: true });
+    await mkdir(join(libraryDir, "agents", "review"), { recursive: true });
+    await mkdir(join(libraryDir, "agents", "survey"), { recursive: true });
+    await writeFile(
+      join(libraryDir, "index.json"),
+      JSON.stringify(
+        {
+          handoff: {
+            description: "Compact current conversation",
+            path: "skills/handoff",
+            type: "skill",
+          },
+          review: {
+            description: "Review changes",
+            path: "agents/review",
+            type: "agent",
+          },
+          survey: {
+            description: "Survey repo",
+            path: "agents/survey",
+            type: "agent",
+          },
+          focus: {
+            description: "Focus workflow",
+            path: "skills/focus",
+            type: "skill",
+          },
+        },
+        null,
+        2,
+      ),
+    );
+    await writeFile(
+      join(context.projectDir, "jawfish.json"),
+      JSON.stringify(
+        {
+          jawfish: {
+            focus: { tool: "codex" },
+            review: { tool: "codex" },
+            ghost: { tool: "codex" },
+          },
+        },
+        null,
+        2,
+      ),
+    );
+    await writeFile(
+      join(context.homeDir, "jawfish.json"),
+      JSON.stringify(
+        {
+          jawfish: {
+            handoff: { tool: "codex" },
+            review: { tool: "codex" },
+          },
+        },
+        null,
+        2,
+      ),
+    );
+
+    const table = await runJawfish(context, ["list"]);
+    assert.equal(table.exitCode, 0, table.stderr);
+    assert.match(table.stdout, /┌/);
+    assert.match(
+      table.stdout,
+      /│ name\s+│ type\s+│ installed\s+│ description/,
+    );
+    assert.match(
+      table.stdout,
+      /│ focus\s+│ skill\s+│ project\s+│ Focus workflow/,
+    );
+    assert.match(
+      table.stdout,
+      /│ handoff\s+│ skill\s+│ global\s+│ Compact current conversation/,
+    );
+    assert.match(
+      table.stdout,
+      /│ review\s+│ agent\s+│ both\s+│ Review changes/,
+    );
+    assert.match(table.stdout, /│ survey\s+│ agent\s+│ -\s+│ Survey repo/);
+    assert.doesNotMatch(table.stdout, /ghost/);
+    assert.ok(table.stdout.indexOf("focus") < table.stdout.indexOf("handoff"));
+    assert.ok(table.stdout.indexOf("handoff") < table.stdout.indexOf("review"));
+
+    const raw = await runJawfish(context, ["list", "--raw"]);
+    assert.equal(raw.exitCode, 0, raw.stderr);
+    assert.deepEqual(JSON.parse(raw.stdout), [
+      {
+        description: "Focus workflow",
+        installed: "project",
+        name: "focus",
+        path: "~/content-library/skills/focus",
+        type: "skill",
+      },
+      {
+        description: "Compact current conversation",
+        installed: "global",
+        name: "handoff",
+        path: "~/content-library/skills/handoff",
+        type: "skill",
+      },
+      {
+        description: "Review changes",
+        installed: "both",
+        name: "review",
+        path: "~/content-library/agents/review",
+        type: "agent",
+      },
+      {
+        description: "Survey repo",
+        installed: "-",
+        name: "survey",
+        path: "~/content-library/agents/survey",
+        type: "agent",
+      },
+    ]);
+
+    const skills = await runJawfish(context, ["list", "--type", "skill"]);
+    assert.equal(skills.exitCode, 0, skills.stderr);
+    assert.match(skills.stdout, /focus/);
+    assert.match(skills.stdout, /handoff/);
+    assert.doesNotMatch(skills.stdout, /review/);
+    assert.doesNotMatch(skills.stdout, /survey/);
+
+    const projectInstalled = await runJawfish(context, [
+      "list",
+      "--installed",
+      "project",
+    ]);
+    assert.equal(projectInstalled.exitCode, 0, projectInstalled.stderr);
+    assert.match(projectInstalled.stdout, /focus/);
+    assert.match(projectInstalled.stdout, /review/);
+    assert.doesNotMatch(projectInstalled.stdout, /handoff/);
+    assert.doesNotMatch(projectInstalled.stdout, /survey/);
+
+    const globalInstalled = await runJawfish(context, [
+      "list",
+      "--installed",
+      "global",
+    ]);
+    assert.equal(globalInstalled.exitCode, 0, globalInstalled.stderr);
+    assert.match(globalInstalled.stdout, /handoff/);
+    assert.match(globalInstalled.stdout, /review/);
+    assert.doesNotMatch(globalInstalled.stdout, /focus/);
+    assert.doesNotMatch(globalInstalled.stdout, /survey/);
+
+    const bothInstalled = await runJawfish(context, [
+      "list",
+      "--installed",
+      "both",
+    ]);
+    assert.equal(bothInstalled.exitCode, 0, bothInstalled.stderr);
+    assert.match(bothInstalled.stdout, /review/);
+    assert.doesNotMatch(bothInstalled.stdout, /focus/);
+    assert.doesNotMatch(bothInstalled.stdout, /handoff/);
+    assert.doesNotMatch(bothInstalled.stdout, /survey/);
+
+    const uninstalled = await runJawfish(context, [
+      "list",
+      "--installed",
+      "none",
+    ]);
+    assert.equal(uninstalled.exitCode, 0, uninstalled.stderr);
+    assert.match(uninstalled.stdout, /survey/);
+    assert.doesNotMatch(uninstalled.stdout, /focus/);
+    assert.doesNotMatch(uninstalled.stdout, /handoff/);
+    assert.doesNotMatch(uninstalled.stdout, /review/);
+
+    const anyInstalled = await runJawfish(context, [
+      "list",
+      "--installed",
+      "any",
+    ]);
+    assert.equal(anyInstalled.exitCode, 0, anyInstalled.stderr);
+    assert.match(anyInstalled.stdout, /focus/);
+    assert.match(anyInstalled.stdout, /handoff/);
+    assert.match(anyInstalled.stdout, /review/);
+    assert.doesNotMatch(anyInstalled.stdout, /survey/);
+
+    const projectSkills = await runJawfish(context, [
+      "list",
+      "--type",
+      "skill",
+      "--installed",
+      "project",
+    ]);
+    assert.equal(projectSkills.exitCode, 0, projectSkills.stderr);
+    assert.match(projectSkills.stdout, /focus/);
+    assert.doesNotMatch(projectSkills.stdout, /handoff/);
+    assert.doesNotMatch(projectSkills.stdout, /review/);
+    assert.doesNotMatch(projectSkills.stdout, /survey/);
+
+    const rawUninstalled = await runJawfish(context, [
+      "list",
+      "--installed",
+      "none",
+      "--raw",
+    ]);
+    assert.equal(rawUninstalled.exitCode, 0, rawUninstalled.stderr);
+    assert.deepEqual(
+      JSON.parse(rawUninstalled.stdout).map(
+        (entry: { name: string }) => entry.name,
+      ),
+      ["survey"],
+    );
+
+    const empty = await runJawfish(context, ["list", "--type", "prompt"]);
+    assert.equal(empty.exitCode, 0, empty.stderr);
+    assert.match(
+      empty.stdout,
+      /│ name\s+│ type\s+│ installed\s+│ description/,
+    );
+    assert.doesNotMatch(empty.stdout, /focus|handoff|review|survey/);
+  });
+
+  test("rejects unsupported list type", async () => {
+    const context = await setup();
+    const libraryDir = join(context.homeDir, "content-library");
+
+    await writeJawfishConfig(context, libraryDir);
+    const result = await runJawfish(context, ["list", "--type", "script"]);
+
+    assert.equal(result.exitCode, 1);
+    assert.match(
+      result.stderr,
+      /Unsupported type: script\. Supported types: skill, agent, prompt/,
+    );
+  });
+
+  test("rejects unsupported list installed filter", async () => {
+    const context = await setup();
+    const libraryDir = join(context.homeDir, "content-library");
+
+    await writeJawfishConfig(context, libraryDir);
+    const result = await runJawfish(context, [
+      "list",
+      "--installed",
+      "local",
+    ]);
+
+    assert.equal(result.exitCode, 1);
+    assert.match(
+      result.stderr,
+      /Unsupported installed filter: local\. Supported filters: project, global, both, none, any/,
+    );
   });
 
   test("adds a URL source with no configured content library", async () => {

@@ -29,7 +29,7 @@ jawfish add https://github.com/mattpocock/skills/blob/main/skills/productivity/h
 ```
 
 Jawfish creates `~/.jawfish/config.json` and a local content library at
-`~/.jawfish/content-library` on first use.
+`~/.jawfish/content-library` on first use. The library is a git repo.
 
 Initialize first, if you want to choose defaults before adding:
 
@@ -41,6 +41,12 @@ Use an existing content library:
 
 ```sh
 jawfish init git@github.com:you/agentics.git
+```
+
+Browse the library:
+
+```sh
+jawfish list
 ```
 
 Install everything from the manifest:
@@ -75,6 +81,7 @@ Project installs are tracked in `jawfish.json`. Global installs are tracked in
 | `jawfish i <name>`                 | Same as `jawfish add <name>`         |
 | `jawfish install`                  | Reinstall everything in the manifest |
 | `jawfish i`                        | Same as `jawfish install`            |
+| `jawfish list`                     | Browse available library entries     |
 | `jawfish update [name]`            | Pull upstream changes                |
 | `jawfish upgrade`                  | Upgrade jawfish itself               |
 | `jawfish remove <name>`            | Remove a managed install             |
@@ -83,6 +90,13 @@ Project installs are tracked in `jawfish.json`. Global installs are tracked in
 
 `import-skills` previews found skills and conflicts, then asks before writing.
 Add `-y` or `--yes` to import without the prompt.
+
+`list` shows project/global install status. It accepts
+`--type skill|agent|prompt`, `--installed project|global|both|none|any`,
+and `--raw` for JSON output.
+
+Jawfish pulls remote-backed libraries before install/list and commits/pushes
+library changes after add/import/update when an upstream exists.
 
 Add `--global` or `-g` to target your global tool config instead of the
 current project.
