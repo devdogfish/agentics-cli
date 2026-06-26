@@ -1159,6 +1159,83 @@ describe("jawfish CLI", () => {
     );
   });
 
+  test("add adopts matching unmanaged destination into the selected manifest", async () => {
+    const context = await setup();
+    const agenticsRepoDir = join(context.rootDir, "agentics");
+    const codexHome = join(context.rootDir, "codex-home");
+    const installDir = join(codexHome, "skills", "focus");
+
+    await createGitRepository(agenticsRepoDir);
+    await writeIndexedFocusSkill(agenticsRepoDir);
+    await writeJawfishConfig(context, agenticsRepoDir);
+    await mkdir(installDir, { recursive: true });
+    await writeFile(
+      join(installDir, "SKILL.md"),
+      "# Focus\n\nUse focused execution.\n",
+    );
+    await writeFile(
+      join(installDir, ".library-managed.yaml"),
+      "manager: library\ncatalog_name: focus\n",
+    );
+
+    const result = await runJawfish(context, ["add", "-g", "focus"], {
+      env: { CODEX_HOME: codexHome },
+    });
+
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.deepEqual(
+      JSON.parse(await readFile(join(context.homeDir, "jawfish.json"), "utf8")),
+      { jawfish: { focus: { tool: "codex" } } },
+    );
+    assert.deepEqual(
+      JSON.parse(await readFile(join(installDir, ".jawfish-managed.json"), "utf8")),
+      {
+        files: ["SKILL.md"],
+        name: "focus",
+        tool: "codex",
+        type: "skill",
+      },
+    );
+    assert.equal(
+      await readFile(join(installDir, ".library-managed.yaml"), "utf8"),
+      "manager: library\ncatalog_name: focus\n",
+    );
+    const list = await runJawfish(context, ["list", "--raw"], {
+      env: { CODEX_HOME: codexHome },
+    });
+    assert.equal(
+      JSON.parse(list.stdout).find(
+        (entry: { name: string }) => entry.name === "focus",
+      ).installed,
+      "global",
+    );
+  });
+
+  test("remove reports when the selected scope has no managed manifest entry", async () => {
+    const context = await setup();
+    const agenticsRepoDir = join(context.rootDir, "agentics");
+    const codexHome = join(context.rootDir, "codex-home");
+    const installDir = join(codexHome, "skills", "focus");
+
+    await createGitRepository(agenticsRepoDir);
+    await writeIndexedFocusSkill(agenticsRepoDir);
+    await writeJawfishConfig(context, agenticsRepoDir);
+    await mkdir(installDir, { recursive: true });
+    await writeFile(join(installDir, "SKILL.md"), "# Local Focus\n");
+
+    const result = await runJawfish(context, ["remove", "-g", "focus"], {
+      env: { CODEX_HOME: codexHome },
+    });
+
+    assert.equal(result.exitCode, 1);
+    assert.match(result.stderr, /Not installed in global: focus/);
+    assert.equal(
+      await readFile(join(installDir, "SKILL.md"), "utf8"),
+      "# Local Focus\n",
+    );
+    await assertMissingFile(join(context.homeDir, "jawfish.json"));
+  });
+
   test("remove deletes managed files and manifest entries while preserving unmanaged files", async () => {
     const context = await setup();
     const agenticsRepoDir = join(context.rootDir, "agentics");

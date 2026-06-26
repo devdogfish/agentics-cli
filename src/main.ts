@@ -575,7 +575,12 @@ async function removeCommand(args: ParsedArgs): Promise<number> {
   const manifestEntry = manifest.jawfish[name];
   const catalogEntry = catalog.jawfish[name];
 
-  if (manifestEntry !== undefined && catalogEntry !== undefined) {
+  if (manifestEntry === undefined) {
+    console.error(`Not installed in ${scope}: ${name}`);
+    return 1;
+  }
+
+  if (catalogEntry !== undefined) {
     assertSupportedConfiguredTool(
       manifestEntry.tool,
       `manifest entry "${name}"`,

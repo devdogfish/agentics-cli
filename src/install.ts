@@ -195,6 +195,11 @@ async function materializePackage(
     return;
   }
 
+  if (await canAdoptUnmanagedDestination(destination.path, sourceFiles)) {
+    await writeManagedMarker(destination.path, sourceFiles, name, tool, type);
+    return;
+  }
+
   const managedFiles = await managedFileSet(destination.path);
 
   await assertNoUnmanagedConflicts(destination.path, sourceFiles, managedFiles);
@@ -248,6 +253,10 @@ async function assertCanCopyNativeFile(
     );
   }
 
+  if (await canAdoptUnmanagedNativeFile(destination.path, sourceFile.path)) {
+    return sourceFile;
+  }
+
   await assertNoUnmanagedNativeConflict(destination.path);
   return sourceFile;
 }
@@ -278,6 +287,70 @@ async function assertNoUnmanagedConflicts(
       );
     }
   }
+}
+
+async function canAdoptUnmanagedDestination(
+  destination: string,
+  sourceFiles: PackageFile[],
+): Promise<boolean> {
+  if (!(await exists(destination))) {
+    return false;
+  }
+  if (await exists(join(destination, managedMarkerFile))) {
+    return false;
+  }
+
+  return await directoryContainsMatchingPackage(destination, sourceFiles);
+}
+
+async function canAdoptUnmanagedNativeFile(
+  destination: string,
+  sourcePath: string,
+): Promise<boolean> {
+  if (
+    !(await exists(destination)) ||
+    (await exists(nativeMarkerPath(destination)))
+  ) {
+    return false;
+  }
+
+  return await filesMatch(sourcePath, destination);
+}
+
+async function directoryContainsMatchingPackage(
+  destination: string,
+  sourceFiles: PackageFile[],
+): Promise<boolean> {
+  for (const sourceFile of sourceFiles) {
+    const installedPath = join(destination, sourceFile.relativePath);
+    if (
+      !(await exists(installedPath)) ||
+      !(await filesMatch(sourceFile.path, installedPath))
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+async function filesMatch(left: string, right: string): Promise<boolean> {
+  return (await readFile(left)).equals(await readFile(right));
+}
+
+async function writeManagedMarker(
+  destination: string,
+  sourceFiles: PackageFile[],
+  name: string,
+  tool: string,
+  type: AgenticType,
+): Promise<void> {
+  await writeJson(join(destination, managedMarkerFile), {
+    files: sourceFiles.map((file) => file.relativePath).sort(),
+    name,
+    tool,
+    type,
+  });
 }
 
 async function removeStaleManagedFiles(
@@ -315,6 +388,7 @@ async function managedFileSet(destination: string): Promise<Set<string>> {
   if (!(await exists(markerPath))) {
     throw new Error(
       `Refusing to overwrite unmanaged destination: ${destination}\n` +
+        "This destination is not managed by Jawfish.\n" +
         "Remove it or move it aside, then retry.",
     );
   }
