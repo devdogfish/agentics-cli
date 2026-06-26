@@ -140,6 +140,9 @@ Jawfish currently supports `codex`, `claude-code`, `hermes`, `openclaw`,
 `~/.jawfish/agentics`. You can also set it with
 `JAWFISH_AGENTICS_REPO`.
 
+`autoScanRepoSkills` defaults to `true`. Set it to `false` to make direct
+repo skill paths import only that skill. Repo-root adds still scan for skills.
+
 Project installs go into `.codex/`, `.claude/`, `.hermes/`, `skills/`,
 `.opencode/`, or `.pi/`.
 

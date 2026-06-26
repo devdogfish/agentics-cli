@@ -14,6 +14,7 @@ const projectManifestFile = "jawfish.json";
 
 export interface JawfishConfig {
   agenticsRepo?: string;
+  autoScanRepoSkills?: boolean;
   defaultTool?: string;
 }
 
@@ -73,6 +74,9 @@ export async function loadConfig(
 
   if (existing.agenticsRepo !== undefined) {
     config.agenticsRepo = existing.agenticsRepo;
+  }
+  if (existing.autoScanRepoSkills !== undefined) {
+    config.autoScanRepoSkills = existing.autoScanRepoSkills;
   }
   if (existing.defaultTool !== undefined) {
     config.defaultTool = existing.defaultTool;
@@ -165,6 +169,9 @@ async function writeConfig(path: string, config: JawfishConfig): Promise<void> {
   const persisted: JawfishConfig = {};
   if (config.agenticsRepo !== undefined) {
     persisted.agenticsRepo = config.agenticsRepo;
+  }
+  if (config.autoScanRepoSkills !== undefined) {
+    persisted.autoScanRepoSkills = config.autoScanRepoSkills;
   }
   if (config.defaultTool !== undefined) {
     persisted.defaultTool = config.defaultTool;

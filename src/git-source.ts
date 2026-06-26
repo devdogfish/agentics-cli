@@ -43,5 +43,10 @@ export async function inferredLocalGitUpstream(
     return undefined;
   }
 
-  return `${origin}#${relative(rootPath, sourcePath).replaceAll("\\", "/")}`;
+  const resolvedSourcePath = await realpath(sourcePath);
+  const relativeSourcePath = relative(rootPath, resolvedSourcePath).replaceAll(
+    "\\",
+    "/",
+  );
+  return `${origin}#${relativeSourcePath}`;
 }

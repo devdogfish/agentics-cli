@@ -5,6 +5,7 @@ import {
   mkdir,
   readdir,
   readFile,
+  realpath,
   rm,
   stat,
   writeFile,
@@ -43,6 +44,7 @@ async function writeJawfishConfig(
   context: CliTestContext,
   agenticsRepoDir: string,
   tool = "codex",
+  overrides: Partial<JawfishConfig> = {},
 ): Promise<void> {
   const configDir = join(context.homeDir, ".config", "jawfish");
 
@@ -53,6 +55,7 @@ async function writeJawfishConfig(
       {
         agenticsRepo: agenticsRepoDir,
         defaultTool: tool,
+        ...overrides,
       },
       null,
       2,
@@ -1386,7 +1389,13 @@ describe("jawfish CLI", () => {
     ]);
 
     assert.equal(result.exitCode, 0, result.stderr);
+    assert.equal(result.stdout.split("\n")[0], "Added focus to project");
     assert.match(result.stdout, /Added focus to project/);
+    assert.match(
+      result.stdout,
+      /Also found 1 repo skill\. Run jawfish add <repo> to choose them\./,
+    );
+    assert.doesNotMatch(result.stdout, /Discovered repo skills/);
     assert.equal(
       await readFile(
         join(context.projectDir, ".codex", "skills", "focus", "SKILL.md"),
@@ -1402,7 +1411,50 @@ describe("jawfish CLI", () => {
         description: "",
         path: "skills/focus",
         type: "skill",
-        upstream: join(sourceRepoDir, "skills", "focus"),
+        upstream: await realpath(join(sourceRepoDir, "skills", "focus")),
+      },
+    });
+  });
+
+  test("config can disable sibling scanning for direct repo skill paths", async () => {
+    const context = await setup();
+    const agenticsRepoDir = join(context.rootDir, "agentics");
+    const sourceRepoDir = join(context.rootDir, "skills-source");
+    const focusSkill = join(sourceRepoDir, "skills", "focus", "SKILL.md");
+
+    await createGitRepository(agenticsRepoDir);
+    await createGitRepository(sourceRepoDir);
+    await mkdir(join(sourceRepoDir, "skills", "focus"), { recursive: true });
+    await mkdir(join(sourceRepoDir, "skills", "plan"), { recursive: true });
+    await writeFile(focusSkill, "# Focus\n");
+    await writeFile(join(sourceRepoDir, "skills", "plan", "SKILL.md"), "# Plan\n");
+    await git(sourceRepoDir, ["add", "."]);
+    await git(sourceRepoDir, ["commit", "-m", "add skills"]);
+    await writeJawfishConfig(context, agenticsRepoDir, "codex", {
+      autoScanRepoSkills: false,
+    });
+
+    const result = await runJawfish(context, ["add", focusSkill]);
+
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.match(result.stdout, /^Added focus to project/m);
+    assert.doesNotMatch(result.stdout, /Discovered repo skills/);
+    assert.equal(
+      await readFile(
+        join(context.projectDir, ".codex", "skills", "focus", "SKILL.md"),
+        "utf8",
+      ),
+      "# Focus\n",
+    );
+    await assertMissingFile(
+      join(context.projectDir, ".codex", "skills", "plan", "SKILL.md"),
+    );
+    await assertJsonFile(join(agenticsRepoDir, "index.json"), {
+      focus: {
+        description: "",
+        path: "skills/focus",
+        type: "skill",
+        upstream: focusSkill,
       },
     });
   });

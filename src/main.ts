@@ -132,6 +132,11 @@ interface RepoSkillSelection {
   name: string;
 }
 
+interface RepoSkillImportResult {
+  selected: RepoSkillSelection[];
+  unselectedSiblingCount: number;
+}
+
 interface BulkUpdateFailure {
   details: string;
   message: string;
@@ -372,8 +377,8 @@ async function addCommand(args: ParsedArgs): Promise<number> {
   }
 
   const repoSource = await acquireRepoSource(source);
-  if (repoSource !== undefined) {
-    const selected = await importAndInstallRepoSkills(
+  if (repoSource !== undefined && shouldScanRepoSkills(repoSource, config)) {
+    const result = await importAndInstallRepoSkills(
       agenticsRepoDir,
       catalog,
       repoSource,
@@ -381,8 +386,15 @@ async function addCommand(args: ParsedArgs): Promise<number> {
       scope,
       config,
     );
-    if (selected.length > 0) {
-      console.log(`Added ${selected.map((item) => item.name).join(", ")} to ${scope}`);
+    if (result.selected.length > 0) {
+      console.log(
+        `Added ${result.selected.map((item) => item.name).join(", ")} to ${scope}`,
+      );
+      if (result.unselectedSiblingCount > 0) {
+        console.log(
+          `Also found ${formatRepoSkillCount(result.unselectedSiblingCount)}. Run jawfish add <repo> to choose them.`,
+        );
+      }
     }
     return 0;
   }
@@ -702,13 +714,15 @@ async function importAndInstallRepoSkills(
   args: ParsedArgs,
   scope: InstallScope,
   config: JawfishConfig,
-): Promise<RepoSkillSelection[]> {
+): Promise<RepoSkillImportResult> {
   const candidates = await repoSkillCandidates(catalog, repoSource);
   if (candidates.length === 0) {
     throw new Error(`No skills found in repository source: ${repoSource.rootPath}`);
   }
 
-  printRepoSkillCandidates(candidates);
+  if (!isDirectRepoSkillSource(repoSource)) {
+    printRepoSkillCandidates(candidates);
+  }
   const selectedCandidates = await selectRepoSkillCandidates(
     candidates,
     repoSource,
@@ -716,7 +730,7 @@ async function importAndInstallRepoSkills(
   );
   if (selectedCandidates.length === 0) {
     console.log("No repo skills selected");
-    return [];
+    return { selected: [], unselectedSiblingCount: 0 };
   }
 
   assertRepoSkillSelection(selectedCandidates);
@@ -741,7 +755,7 @@ async function importAndInstallRepoSkills(
     await writeCatalog(agenticsRepoDir, catalog);
     const names = selections.map((selection) => selection.name).join(", ");
     if (!(await pushAgenticsRepoChanges(agenticsRepoDir, `add ${names}`))) {
-      return [];
+      return { selected: [], unselectedSiblingCount: 0 };
     }
   }
 
@@ -749,7 +763,52 @@ async function importAndInstallRepoSkills(
     await installOne(agenticsRepoDir, catalog, selection.name, scope, config);
   }
 
-  return selections;
+  return {
+    selected: selections,
+    unselectedSiblingCount: unselectedRepoSiblingCount(
+      candidates,
+      selectedCandidates,
+      repoSource,
+    ),
+  };
+}
+
+function shouldScanRepoSkills(
+  repoSource: RepoSource,
+  config: JawfishConfig,
+): boolean {
+  if (!isDirectRepoSkillSource(repoSource)) {
+    return true;
+  }
+
+  return config.autoScanRepoSkills !== false;
+}
+
+function unselectedRepoSiblingCount(
+  candidates: RepoSkillCandidate[],
+  selectedCandidates: RepoSkillCandidate[],
+  repoSource: RepoSource,
+): number {
+  if (!isDirectRepoSkillSource(repoSource)) {
+    return 0;
+  }
+
+  const selectedPaths = new Set(
+    selectedCandidates.map((candidate) => candidate.relativePath),
+  );
+  return candidates.filter(
+    (candidate) =>
+      candidate.relativePath !== repoSource.directRelativePath &&
+      !selectedPaths.has(candidate.relativePath),
+  ).length;
+}
+
+function isDirectRepoSkillSource(repoSource: RepoSource): boolean {
+  return repoSource.directRelativePath !== undefined;
+}
+
+function formatRepoSkillCount(count: number): string {
+  return `${count} repo ${count === 1 ? "skill" : "skills"}`;
 }
 
 async function importRepoSkillCandidate(
