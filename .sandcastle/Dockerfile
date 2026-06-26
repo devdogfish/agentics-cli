@@ -5,6 +5,7 @@ RUN apt-get update && apt-get install -y \
   git \
   curl \
   jq \
+  unzip \
   && rm -rf /var/lib/apt/lists/*
 
 # Install GitHub CLI
@@ -25,7 +26,10 @@ ARG AGENT_GID=1000
 RUN groupmod -o -g $AGENT_GID node && usermod -o -u $AGENT_UID -g $AGENT_GID -d /home/agent -m -l agent node
 
 # Install Codex CLI and Bun (run as root before USER agent)
-RUN npm install -g @openai/codex bun
+RUN npm install -g @openai/codex \
+  && curl -fsSL https://bun.sh/install | bash \
+  && cp /root/.bun/bin/bun /usr/local/bin/bun \
+  && chmod +x /usr/local/bin/bun
 
 USER ${AGENT_UID}:${AGENT_GID}
 
