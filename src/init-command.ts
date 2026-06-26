@@ -1,3 +1,4 @@
+import { cancel, isCancel, select, text } from "@clack/prompts";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import {
@@ -12,6 +13,7 @@ import {
   defaultSupportedTools,
   deprecatedAgenticsRepoPath,
   existingConfigPath,
+  jawfishHome,
   loadConfig,
   managedAgenticsRepoPath,
   manifestPath,
@@ -31,7 +33,30 @@ interface InitCommandArgs {
   yes: boolean;
 }
 
-export async function initCommand(args: InitCommandArgs): Promise<number> {
+export interface InitCommandPrompts {
+  inputAgenticsRepo: () => Promise<string>;
+  selectAgenticsRepoMode: () => Promise<"link" | "local">;
+  selectDefaultTool: (supportedTools: readonly string[]) => Promise<string>;
+}
+
+interface InitCommandOptions {
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+  prompts?: InitCommandPrompts;
+}
+
+interface InitContext {
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  prompts: InitCommandPrompts;
+}
+
+export async function initCommand(
+  args: InitCommandArgs,
+  options: InitCommandOptions = {},
+): Promise<number> {
+  const context = initContext(options);
+
   if (
     args.force ||
     args.global ||
@@ -44,33 +69,68 @@ export async function initCommand(args: InitCommandArgs): Promise<number> {
     return 1;
   }
 
-  const configFile = await existingConfigPath();
+  const configFile = await existingConfigPath(context.env);
   if (configFile === undefined) {
-    const config = await createMachineSetup();
-    console.log(`Initialized jawfish at ${configPath()}`);
+    const config = args.yes
+      ? await createMachineSetup(context)
+      : await createInteractiveMachineSetup(context);
+    console.log(`Initialized jawfish at ${configPath(jawfishHome(context.env))}`);
     console.log(`Agentics repo: ${config.agenticsRepo}`);
-    await printAgenticsRepoInspection(config.agenticsRepo);
+    await printAgenticsRepoInspection(config.agenticsRepo, context);
     return 0;
   }
 
-  const config = await validateMachineSetup();
-  await ensureProjectManifest();
-  console.log(`Initialized project at ${manifestPath("project")}`);
-  await printAgenticsRepoInspection(config.agenticsRepo);
+  const config = await validateMachineSetup(context);
+  await ensureProjectManifest(context);
+  console.log(`Initialized project at ${manifestPath("project", context.env, context.cwd)}`);
+  await printAgenticsRepoInspection(config.agenticsRepo, context);
   return 0;
 }
 
-async function createMachineSetup(): Promise<JawfishConfig> {
-  const defaultTool = process.env.JAWFISH_DEFAULT_TOOL ?? firstSupportedTool();
+function initContext(options: InitCommandOptions): InitContext {
+  return {
+    cwd: options.cwd ?? process.cwd(),
+    env: options.env ?? process.env,
+    prompts: options.prompts ?? defaultInitPrompts,
+  };
+}
+
+const defaultInitPrompts: InitCommandPrompts = {
+  inputAgenticsRepo: promptForAgenticsRepo,
+  selectAgenticsRepoMode: promptForAgenticsRepoMode,
+  selectDefaultTool: promptForDefaultTool,
+};
+
+async function createMachineSetup(context: InitContext): Promise<JawfishConfig> {
+  const defaultTool = context.env.JAWFISH_DEFAULT_TOOL ?? firstSupportedTool();
   assertSupportedConfiguredTool(defaultTool, "JAWFISH_DEFAULT_TOOL");
 
   const agenticsRepo =
-    process.env.JAWFISH_AGENTICS_REPO ?? managedAgenticsRepoPath();
+    context.env.JAWFISH_AGENTICS_REPO ?? managedAgenticsRepoPath(context.env);
   const config: JawfishConfig = { agenticsRepo, defaultTool };
 
-  await saveConfig(config);
-  await initializeLocalAgenticsRepo(agenticsRepo);
-  await ensureGlobalManifest();
+  await saveConfig(config, { env: context.env });
+  await initializeLocalAgenticsRepo(agenticsRepo, context);
+  await ensureGlobalManifest(context);
+  return config;
+}
+
+async function createInteractiveMachineSetup(
+  context: InitContext,
+): Promise<JawfishConfig> {
+  const defaultTool = await context.prompts.selectDefaultTool(defaultSupportedTools);
+  assertSupportedConfiguredTool(defaultTool, "selected default tool");
+
+  const repoMode = await context.prompts.selectAgenticsRepoMode();
+  const agenticsRepo =
+    repoMode === "local"
+      ? managedAgenticsRepoPath(context.env)
+      : await context.prompts.inputAgenticsRepo();
+
+  const config: JawfishConfig = { agenticsRepo, defaultTool };
+  await prepareAgenticsRepo(agenticsRepo, repoMode, context);
+  await ensureGlobalManifest(context);
+  await saveConfig(config, { env: context.env });
   return config;
 }
 
@@ -83,10 +143,38 @@ function firstSupportedTool(): string {
   return tool;
 }
 
-async function initializeLocalAgenticsRepo(agenticsRepo: string): Promise<void> {
-  const agenticsRepoDir = isAbsolute(agenticsRepo)
-    ? agenticsRepo
-    : resolve(process.cwd(), agenticsRepo);
+async function prepareAgenticsRepo(
+  agenticsRepo: string,
+  mode: "link" | "local",
+  context: InitContext,
+): Promise<void> {
+  if (mode === "local") {
+    await initializeLocalAgenticsRepo(agenticsRepo, context);
+    return;
+  }
+
+  const linkedPath = resolveConfiguredPath(agenticsRepo, context.cwd);
+  if ((await exists(linkedPath)) && !(await isBareRepository(linkedPath))) {
+    await initializeLocalAgenticsRepo(linkedPath, context);
+    return;
+  }
+
+  if ((await exists(linkedPath)) || looksLikeGitUrl(agenticsRepo)) {
+    await initializeManagedAgenticsRepo(
+      agenticsRepo,
+      managedAgenticsRepoPath(context.env),
+    );
+    return;
+  }
+
+  throw new Error(`Agentics repo path not found: ${agenticsRepo}`);
+}
+
+async function initializeLocalAgenticsRepo(
+  agenticsRepo: string,
+  context: InitContext,
+): Promise<void> {
+  const agenticsRepoDir = resolveConfiguredPath(agenticsRepo, context.cwd);
 
   await mkdir(agenticsRepoDir, { recursive: true });
   if (!(await exists(join(agenticsRepoDir, ".git")))) {
@@ -97,30 +185,90 @@ async function initializeLocalAgenticsRepo(agenticsRepo: string): Promise<void> 
   await ensureAgenticsRepoIgnore(agenticsRepoDir);
 }
 
-async function ensureGlobalManifest(): Promise<void> {
-  await ensureManifest(manifestPath("global"));
+async function initializeManagedAgenticsRepo(
+  source: string,
+  agenticsRepoDir: string,
+): Promise<void> {
+  await mkdir(agenticsRepoDir, { recursive: true });
+  if (!(await exists(join(agenticsRepoDir, ".git")))) {
+    await runCommand("git", ["init"], agenticsRepoDir);
+    await configureAgenticsRepoGitUser(agenticsRepoDir);
+    await runCommand("git", ["remote", "add", "origin", source], agenticsRepoDir);
+  } else {
+    await configureAgenticsRepoGitUser(agenticsRepoDir);
+    await runCommand("git", ["remote", "set-url", "origin", source], agenticsRepoDir);
+  }
+
+  await runCommand("git", ["fetch", "origin"], agenticsRepoDir);
+
+  const branch = await remoteDefaultBranch(agenticsRepoDir);
+  await runCommand(
+    "git",
+    ["checkout", "-B", branch, `origin/${branch}`],
+    agenticsRepoDir,
+  );
+  await runCommand(
+    "git",
+    ["branch", "--set-upstream-to", `origin/${branch}`, branch],
+    agenticsRepoDir,
+  );
+  await ensureAgenticsRepoIgnore(agenticsRepoDir);
 }
 
-async function ensureProjectManifest(): Promise<void> {
-  await ensureManifest(manifestPath("project"));
+async function remoteDefaultBranch(agenticsRepoDir: string): Promise<string> {
+  const result = await runCommand(
+    "git",
+    ["ls-remote", "--symref", "origin", "HEAD"],
+    agenticsRepoDir,
+  );
+  const match = /^ref: refs\/heads\/([^\t]+)\tHEAD$/mu.exec(result.stdout);
+  if (match === null) {
+    throw new Error("Could not determine agentics repo default branch");
+  }
+
+  return match[1];
 }
 
-async function validateMachineSetup(): Promise<JawfishConfig> {
-  const config = await loadConfig({ promptForMissingDefaultTool: false });
+async function isBareRepository(path: string): Promise<boolean> {
+  if (!(await exists(path))) {
+    return false;
+  }
+
+  const result = await runCommand(
+    "git",
+    ["rev-parse", "--is-bare-repository"],
+    path,
+    false,
+  );
+  return result.exitCode === 0 && result.stdout.trim() === "true";
+}
+
+async function ensureGlobalManifest(context: InitContext): Promise<void> {
+  await ensureManifest(manifestPath("global", context.env, context.cwd));
+}
+
+async function ensureProjectManifest(context: InitContext): Promise<void> {
+  await ensureManifest(manifestPath("project", context.env, context.cwd));
+}
+
+async function validateMachineSetup(context: InitContext): Promise<JawfishConfig> {
+  const config = await loadConfig({
+    env: context.env,
+    promptForMissingDefaultTool: false,
+  });
   if (config.agenticsRepo === undefined || config.agenticsRepo === "") {
     return config;
   }
 
-  const configured = isAbsolute(config.agenticsRepo)
-    ? config.agenticsRepo
-    : resolve(process.cwd(), config.agenticsRepo);
-  if (resolve(configured) !== resolve(deprecatedAgenticsRepoPath())) {
+  const configured = resolveConfiguredPath(config.agenticsRepo, context.cwd);
+  if (resolve(configured) !== resolve(deprecatedAgenticsRepoPath(context.env))) {
     return config;
   }
 
   throw new Error(
     `Nested agentics repo is no longer supported: ${configured}\n` +
-      `Move the repo to ${managedAgenticsRepoPath()} and update ${configPath()}.`,
+      `Move the repo to ${managedAgenticsRepoPath(context.env)} and update ` +
+      `${configPath(jawfishHome(context.env))}.`,
   );
 }
 
@@ -135,6 +283,7 @@ async function ensureManifest(path: string): Promise<void> {
 
 async function printAgenticsRepoInspection(
   agenticsRepo: string | undefined,
+  context: InitContext,
 ): Promise<void> {
   if (agenticsRepo === undefined || agenticsRepo === "") {
     console.log("Agentics repo inspection");
@@ -144,11 +293,21 @@ async function printAgenticsRepoInspection(
     return;
   }
 
-  const agenticsRepoDir = isAbsolute(agenticsRepo)
-    ? agenticsRepo
-    : resolve(process.cwd(), agenticsRepo);
+  const agenticsRepoDir = await inspectionAgenticsRepoDir(agenticsRepo, context);
   const inspection = await inspectAgenticsRepo(agenticsRepoDir);
   printInspection(inspection);
+}
+
+async function inspectionAgenticsRepoDir(
+  agenticsRepo: string,
+  context: InitContext,
+): Promise<string> {
+  const configured = resolveConfiguredPath(agenticsRepo, context.cwd);
+  if ((await exists(configured)) && !(await isBareRepository(configured))) {
+    return configured;
+  }
+
+  return managedAgenticsRepoPath(context.env);
 }
 
 function printInspection(inspection: AgenticsRepoInspection): void {
@@ -187,4 +346,60 @@ function formatNames(names: string[]): string {
   }
 
   return names.join(", ");
+}
+
+function resolveConfiguredPath(path: string, cwd: string): string {
+  return isAbsolute(path) ? path : resolve(cwd, path);
+}
+
+function looksLikeGitUrl(value: string): boolean {
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(value) || /^[^@\s]+@[^:\s]+:.+/.test(value);
+}
+
+async function promptForDefaultTool(
+  tools: readonly string[],
+): Promise<string> {
+  const selected = await select({
+    message: "Select default tool",
+    options: tools.map((tool) => ({ label: tool, value: tool })),
+  });
+
+  if (isCancel(selected)) {
+    cancel("No tool selected");
+    throw new Error("No tool selected");
+  }
+
+  return selected;
+}
+
+async function promptForAgenticsRepoMode(): Promise<"link" | "local"> {
+  const selected = await select({
+    message: "Set up agentics repo",
+    options: [
+      { label: "Create local repo", value: "local" },
+      { label: "Link existing path or git URL", value: "link" },
+    ],
+  });
+
+  if (isCancel(selected)) {
+    cancel("No agentics repo selected");
+    throw new Error("No agentics repo selected");
+  }
+
+  return selected;
+}
+
+async function promptForAgenticsRepo(): Promise<string> {
+  const selected = await text({
+    message: "Agentics repo path or git URL",
+    validate: (value) =>
+      (value ?? "").trim() === "" ? "Enter a local path or git URL" : undefined,
+  });
+
+  if (isCancel(selected) || selected === undefined) {
+    cancel("No agentics repo selected");
+    throw new Error("No agentics repo selected");
+  }
+
+  return selected.trim();
 }
