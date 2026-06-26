@@ -1858,9 +1858,7 @@ function parseArgs(args: string[], command: CommandName): ParsedArgs {
         assertAllowedOption(command, arg);
         const name = args[index + 1];
         if (name === undefined) {
-          throw new Error(
-            `--name requires a value\nUsage: ${commandSpecs[command].usage}`,
-          );
+          throw new Error(missingOptionValueMessage(command, "--name"));
         }
 
         parsed.name = name;
@@ -1871,9 +1869,7 @@ function parseArgs(args: string[], command: CommandName): ParsedArgs {
         assertAllowedOption(command, arg);
         const type = args[index + 1];
         if (type === undefined) {
-          throw new Error(
-            `--type requires a value\nUsage: ${commandSpecs[command].usage}`,
-          );
+          throw new Error(missingOptionValueMessage(command, "--type"));
         }
 
         parsed.type = type;
@@ -1884,9 +1880,7 @@ function parseArgs(args: string[], command: CommandName): ParsedArgs {
         assertAllowedOption(command, arg);
         const installed = args[index + 1];
         if (installed === undefined) {
-          throw new Error(
-            `--installed requires a value\nUsage: ${commandSpecs[command].usage}`,
-          );
+          throw new Error(missingOptionValueMessage(command, "--installed"));
         }
 
         parsed.installed = installed;
@@ -1895,9 +1889,7 @@ function parseArgs(args: string[], command: CommandName): ParsedArgs {
       }
       default:
         if (arg.startsWith("-")) {
-          throw new Error(
-            `Unknown option: ${arg}\nUsage: ${commandSpecs[command].usage}`,
-          );
+          throw new Error(optionErrorMessage(command, "Unknown option", arg));
         }
 
         parsed.positionals.push(arg);
@@ -1910,10 +1902,27 @@ function parseArgs(args: string[], command: CommandName): ParsedArgs {
 
 function assertAllowedOption(command: CommandName, option: string): void {
   if (!commandOptions[command].includes(option)) {
-    throw new Error(
-      `Unsupported option: ${option}\nUsage: ${commandSpecs[command].usage}`,
-    );
+    throw new Error(optionErrorMessage(command, "Unsupported option", option));
   }
+}
+
+function missingOptionValueMessage(
+  command: CommandName,
+  option: string,
+): string {
+  return `${option} requires a value\n${usageLine(command)}`;
+}
+
+function optionErrorMessage(
+  command: CommandName,
+  message: string,
+  option: string,
+): string {
+  return `${message}: ${option}\n${usageLine(command)}`;
+}
+
+function usageLine(command: CommandName): string {
+  return `Usage: ${commandSpecs[command].usage}`;
 }
 
 function printRootHelp(): void {
