@@ -40,8 +40,8 @@ jawfish init
 Interactive setup can link an existing agentics repo, install selected starter
 entries globally, and optionally import existing global provider skills.
 
-Use `-y` for the noninteractive defaults, or run `init` again in a project to
-create or update the project manifest:
+Use `-y` for the noninteractive defaults, or run `init` again to choose project
+setup or machine reinitialize:
 
 ```sh
 jawfish init -y
@@ -86,7 +86,7 @@ Project installs are tracked in `jawfish.json`. Global installs are tracked in
 | ---------------------------------- | ------------------------------------ |
 | `jawfish add <name>`               | Install from your repo               |
 | `jawfish add <source>`             | Import from a URL or local file      |
-| `jawfish init [-y]`                | Create machine or project setup      |
+| `jawfish init [-y]`                | Create or edit setup                 |
 | `jawfish import-skills <provider>` | Import global provider skills        |
 | `jawfish install <name>`           | Same as `jawfish add <name>`         |
 | `jawfish i <name>`                 | Same as `jawfish add <name>`         |
@@ -113,10 +113,13 @@ changes after add/import/update when an upstream exists.
 asks for the default tool, creates the local agentics repo by default or links
 an existing local path/git URL, inspects what Jawfish can see, writes repo ignore
 rules, creates the global manifest, offers registered repo entries as global
-starter installs, and can import existing global provider skills. If the linked
-repo is empty, import is offered before starter selection so imported skills can
-be installed in the same run. It does not create GitHub repositories or ask
-branch questions.
+starter installs, and can import existing global provider skills. If machine
+setup already exists, it offers project setup or machine reinitialize. The
+reinitialize menu shows the current config and can change the default tool,
+change the agentics repo link, install global starter entries, or import
+existing global provider skills. If the linked repo is empty, import is offered
+before starter selection so imported skills can be installed in the same run. It
+does not create GitHub repositories, wipe repo contents, or ask branch questions.
 
 `init -y` or `init --yes` uses noninteractive defaults. With no machine config,
 it creates `~/.jawfish/config.json`, the configured/default agentics repo, repo

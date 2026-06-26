@@ -42,10 +42,20 @@ interface InitCommandArgs {
 }
 
 type AgenticsRepoMode = "link" | "local";
+type ExistingMachineInitAction = "project" | "reinitialize";
 type GitRepositoryState = "created" | "existing";
+type MachineReinitializeAction =
+  | "agentics-repo"
+  | "default-tool"
+  | "done"
+  | "global-starters"
+  | "import-skills";
 
 export interface InitCommandPrompts {
   inputAgenticsRepo: () => Promise<string>;
+  selectExistingMachineInitAction?: (
+    hasProjectManifest: boolean,
+  ) => Promise<ExistingMachineInitAction>;
   selectAgenticsRepoMode: () => Promise<AgenticsRepoMode>;
   selectDefaultTool: (supportedTools: readonly string[]) => Promise<string>;
   selectGlobalStarterAgentics?: (
@@ -53,6 +63,7 @@ export interface InitCommandPrompts {
     manifest: Manifest,
   ) => Promise<string[]>;
   selectImportProviders?: (supportedTools: readonly string[]) => Promise<string[]>;
+  selectMachineReinitializeAction?: () => Promise<MachineReinitializeAction>;
   selectProjectAgentics?: (
     inspection: AgenticsRepoInspection,
     manifest: Manifest,
@@ -120,7 +131,7 @@ export async function initCommand(
     return 0;
   }
 
-  await runProjectSetup(config, context);
+  await runExistingMachineInit(config, context);
   return 0;
 }
 
@@ -141,10 +152,12 @@ function initContext(options: InitCommandOptions): InitContext {
 
 const defaultInitPrompts: InitCommandPrompts = {
   inputAgenticsRepo: promptForAgenticsRepo,
+  selectExistingMachineInitAction: promptForExistingMachineInitAction,
   selectAgenticsRepoMode: promptForAgenticsRepoMode,
   selectDefaultTool: promptForDefaultTool,
   selectGlobalStarterAgentics: promptForGlobalStarterAgentics,
   selectImportProviders: promptForImportProviders,
+  selectMachineReinitializeAction: promptForMachineReinitializeAction,
 };
 
 async function createMachineSetup(context: InitContext): Promise<JawfishConfig> {
@@ -339,6 +352,146 @@ async function ensureManifest(path: string): Promise<void> {
   }
 
   await writeJson(path, { jawfish: {} });
+}
+
+async function runExistingMachineInit(
+  config: JawfishConfig,
+  context: InitContext,
+): Promise<void> {
+  const hasProjectManifest = await exists(
+    manifestPath("project", context.env, context.cwd),
+  );
+  const action = await selectExistingMachineInitAction(
+    context,
+    hasProjectManifest,
+  );
+
+  if (action === "project") {
+    await runProjectSetup(config, context);
+    return;
+  }
+
+  await runMachineReinitialize(config, context);
+}
+
+async function selectExistingMachineInitAction(
+  context: InitContext,
+  hasProjectManifest: boolean,
+): Promise<ExistingMachineInitAction> {
+  const prompt =
+    context.prompts.selectExistingMachineInitAction ??
+    promptForExistingMachineInitAction;
+  return await prompt(hasProjectManifest);
+}
+
+async function runMachineReinitialize(
+  initialConfig: JawfishConfig,
+  context: InitContext,
+): Promise<void> {
+  let config = { ...initialConfig };
+
+  await ensureGlobalManifest(context);
+  while (true) {
+    printMachineConfig(config, context);
+    const action = await selectMachineReinitializeAction(context);
+
+    if (action === "done") {
+      return;
+    }
+
+    if (action === "default-tool") {
+      config = await reinitializeDefaultTool(config, context);
+      continue;
+    }
+
+    if (action === "agentics-repo") {
+      config = await reinitializeAgenticsRepo(config, context);
+      continue;
+    }
+
+    if (action === "global-starters") {
+      await runGlobalStarterEdit(config, context);
+      continue;
+    }
+
+    await runImportSkillsEdit(config, context);
+  }
+}
+
+async function selectMachineReinitializeAction(
+  context: InitContext,
+): Promise<MachineReinitializeAction> {
+  const prompt =
+    context.prompts.selectMachineReinitializeAction ??
+    promptForMachineReinitializeAction;
+  return await prompt();
+}
+
+function printMachineConfig(config: JawfishConfig, context: InitContext): void {
+  console.log("Current machine config");
+  console.log(`Default tool: ${config.defaultTool ?? "missing"}`);
+  console.log(`Agentics repo: ${config.agenticsRepo ?? "missing"}`);
+  console.log(`Config: ${configPath(jawfishHome(context.env))}`);
+}
+
+async function reinitializeDefaultTool(
+  config: JawfishConfig,
+  context: InitContext,
+): Promise<JawfishConfig> {
+  const defaultTool = await context.prompts.selectDefaultTool(defaultSupportedTools);
+  assertSupportedConfiguredTool(defaultTool, "selected default tool");
+
+  const nextConfig = { ...config, defaultTool };
+  await saveConfig(nextConfig, { env: context.env });
+  console.log(`Updated default tool: ${defaultTool}`);
+  return nextConfig;
+}
+
+async function reinitializeAgenticsRepo(
+  config: JawfishConfig,
+  context: InitContext,
+): Promise<JawfishConfig> {
+  const repoMode = await context.prompts.selectAgenticsRepoMode();
+  const agenticsRepo = await resolveAgenticsRepoSelection(repoMode, context);
+
+  await prepareAgenticsRepo(agenticsRepo, repoMode, context);
+  const nextConfig = { ...config, agenticsRepo };
+  await saveConfig(nextConfig, { env: context.env });
+  console.log(`Updated agentics repo: ${agenticsRepo}`);
+  await printAgenticsRepoInspection(agenticsRepo, context);
+  return nextConfig;
+}
+
+async function runGlobalStarterEdit(
+  config: JawfishConfig,
+  context: InitContext,
+): Promise<void> {
+  const agenticsRepo = configuredAgenticsRepo(config, context);
+  const agenticsRepoDir = await inspectionAgenticsRepoDir(agenticsRepo, context);
+  const inspection = await inspectAgenticsRepo(agenticsRepoDir);
+
+  printInspection(inspection);
+  if (inspection.usable.length === 0) {
+    console.log("No registered agentics are selectable. Add or import agentics first.");
+    return;
+  }
+
+  await installSelectedGlobalStarters(
+    config,
+    agenticsRepoDir,
+    inspection,
+    context,
+  );
+}
+
+async function runImportSkillsEdit(
+  config: JawfishConfig,
+  context: InitContext,
+): Promise<void> {
+  const agenticsRepo = configuredAgenticsRepo(config, context);
+  const agenticsRepoDir = await inspectionAgenticsRepoDir(agenticsRepo, context);
+
+  await importSelectedProviders(agenticsRepoDir, context);
 }
 
 async function runMachineStarterSetup(
@@ -545,6 +698,50 @@ async function promptForImportProviders(
   if (isCancel(selected)) {
     cancel("Import cancelled");
     throw new Error("Import cancelled");
+  }
+
+  return selected;
+}
+
+async function promptForExistingMachineInitAction(
+  hasProjectManifest: boolean,
+): Promise<ExistingMachineInitAction> {
+  const selected = await select({
+    message: "Choose init action",
+    options: [
+      {
+        label: hasProjectManifest
+          ? "Add/update project items"
+          : "Set up this project",
+        value: "project",
+      },
+      { label: "Reinitialize machine setup", value: "reinitialize" },
+    ],
+  });
+
+  if (isCancel(selected)) {
+    cancel("Init cancelled");
+    throw new Error("Init cancelled");
+  }
+
+  return selected;
+}
+
+async function promptForMachineReinitializeAction(): Promise<MachineReinitializeAction> {
+  const selected = await select({
+    message: "Edit machine setup",
+    options: [
+      { label: "Change default tool", value: "default-tool" },
+      { label: "Change agentics repo link", value: "agentics-repo" },
+      { label: "Install global starter agentics", value: "global-starters" },
+      { label: "Import existing global skills", value: "import-skills" },
+      { label: "Done", value: "done" },
+    ],
+  });
+
+  if (isCancel(selected)) {
+    cancel("Machine reinitialize cancelled");
+    throw new Error("Machine reinitialize cancelled");
   }
 
   return selected;

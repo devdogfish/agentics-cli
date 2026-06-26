@@ -133,8 +133,8 @@ const commandSpecs = {
     ],
   },
   init: {
-    description: "Initialize jawfish config and agentics repo interactively.",
-    summary: "Initialize jawfish",
+    description: "Create or edit jawfish machine/project setup.",
+    summary: "Create or edit setup",
     usage: "jawfish init [options]",
     options: [
       "-y, --yes       Run without prompts",

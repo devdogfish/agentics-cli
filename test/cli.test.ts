@@ -2855,11 +2855,42 @@ describe("jawfish CLI", () => {
       ),
     );
 
-    const result = await runJawfish(context, ["init"], {
-      input: " \x1B[B \r",
-    });
+    const prompts: InitCommandPrompts = {
+      inputAgenticsRepo: async () => {
+        throw new Error("unexpected repo path prompt");
+      },
+      selectAgenticsRepoMode: async () => {
+        throw new Error("unexpected repo mode prompt");
+      },
+      selectDefaultTool: async () => {
+        throw new Error("unexpected default tool prompt");
+      },
+      selectExistingMachineInitAction: async (hasProjectManifest) => {
+        assert.equal(hasProjectManifest, true);
+        return "project";
+      },
+      selectProjectAgentics: async (inspection, manifest) => {
+        assert.deepEqual(inspection.usableNames, ["focus", "review"]);
+        assert.deepEqual(manifest.jawfish, {
+          focus: { tool: "codex" },
+          ghost: { tool: "codex" },
+        });
+        return ["review"];
+      },
+    };
 
-    assert.equal(result.exitCode, 0, result.stderr);
+    const result = await captureConsole(() =>
+      initCommand(initArgs(), {
+        cwd: context.projectDir,
+        env: {
+          HOME: context.homeDir,
+          JAWFISH_HOME: context.homeDir,
+        },
+        prompts,
+      }),
+    );
+
+    assert.equal(result.result, 0, result.stderr);
     assert.match(result.stdout, /Initialized project/);
     assert.match(result.stdout, /Installed review to project/);
     assert.deepEqual(
@@ -2925,12 +2956,229 @@ describe("jawfish CLI", () => {
       })}\n`,
     );
 
-    const result = await runJawfish(context, ["init"]);
+    const result = await runJawfish(context, ["init"], { input: "\r" });
 
     assert.equal(result.exitCode, 0, result.stderr);
     assert.match(result.stdout, /No registered agentics are selectable/);
     await assertJsonFile(join(context.projectDir, "jawfish.json"), {
       jawfish: {},
+    });
+  });
+
+  test("interactive init reinitializes existing machine default tool", async () => {
+    const context = await setup();
+    const agenticsRepoDir = join(context.rootDir, "agentics");
+    const actions: Array<"default-tool" | "done"> = ["default-tool", "done"];
+    const seenProjectManifestStates: boolean[] = [];
+
+    await createGitRepository(agenticsRepoDir);
+    await writeFile(
+      configPath(context.homeDir),
+      `${JSON.stringify({
+        agenticsRepo: agenticsRepoDir,
+        defaultTool: "codex",
+      })}\n`,
+    );
+
+    const prompts: InitCommandPrompts = {
+      inputAgenticsRepo: async () => {
+        throw new Error("unexpected repo path prompt");
+      },
+      selectAgenticsRepoMode: async () => {
+        throw new Error("unexpected repo mode prompt");
+      },
+      selectDefaultTool: async () => "hermes",
+      selectExistingMachineInitAction: async (hasProjectManifest) => {
+        seenProjectManifestStates.push(hasProjectManifest);
+        return "reinitialize";
+      },
+      selectMachineReinitializeAction: async () => {
+        const action = actions.shift();
+        assert.ok(action);
+        return action;
+      },
+      selectProjectAgentics: async () => {
+        throw new Error("unexpected project setup prompt");
+      },
+    };
+
+    const result = await captureConsole(() =>
+      initCommand(initArgs(), {
+        cwd: context.projectDir,
+        env: {
+          HOME: context.homeDir,
+          JAWFISH_HOME: context.homeDir,
+        },
+        prompts,
+      }),
+    );
+
+    assert.equal(result.result, 0, result.stderr);
+    assert.deepEqual(seenProjectManifestStates, [false]);
+    assert.match(result.stdout, /Current machine config/);
+    assert.match(result.stdout, /Default tool: codex/);
+    assert.match(result.stdout, /Updated default tool: hermes/);
+    assert.deepEqual(JSON.parse(await readFile(configPath(context.homeDir), "utf8")), {
+      agenticsRepo: agenticsRepoDir,
+      defaultTool: "hermes",
+    });
+    await assertJsonFile(join(context.homeDir, "jawfish.json"), { jawfish: {} });
+    await assert.rejects(readFile(join(context.projectDir, "jawfish.json"), "utf8"), {
+      code: "ENOENT",
+    });
+  });
+
+  test("interactive init reinitializes repo link from existing project manifest", async () => {
+    const context = await setup();
+    const oldAgenticsRepoDir = join(context.rootDir, "old-agentics");
+    const newAgenticsRepoDir = join(context.rootDir, "new-agentics");
+    const actions: Array<"agentics-repo" | "done"> = ["agentics-repo", "done"];
+    const seenProjectManifestStates: boolean[] = [];
+
+    await createGitRepository(oldAgenticsRepoDir);
+    await createGitRepository(newAgenticsRepoDir);
+    await writeIndexedFocusSkill(newAgenticsRepoDir);
+    await writeFile(
+      configPath(context.homeDir),
+      `${JSON.stringify({
+        agenticsRepo: oldAgenticsRepoDir,
+        defaultTool: "codex",
+      })}\n`,
+    );
+    await writeFile(
+      join(context.projectDir, "jawfish.json"),
+      `${JSON.stringify({ jawfish: { existing: { tool: "codex" } } })}\n`,
+    );
+
+    const prompts: InitCommandPrompts = {
+      inputAgenticsRepo: async () => newAgenticsRepoDir,
+      selectAgenticsRepoMode: async () => "link",
+      selectDefaultTool: async () => {
+        throw new Error("unexpected default tool prompt");
+      },
+      selectExistingMachineInitAction: async (hasProjectManifest) => {
+        seenProjectManifestStates.push(hasProjectManifest);
+        return "reinitialize";
+      },
+      selectMachineReinitializeAction: async () => {
+        const action = actions.shift();
+        assert.ok(action);
+        return action;
+      },
+      selectProjectAgentics: async () => {
+        throw new Error("unexpected project setup prompt");
+      },
+    };
+
+    const result = await captureConsole(() =>
+      initCommand(initArgs(), {
+        cwd: context.projectDir,
+        env: {
+          HOME: context.homeDir,
+          JAWFISH_HOME: context.homeDir,
+        },
+        prompts,
+      }),
+    );
+
+    assert.equal(result.result, 0, result.stderr);
+    assert.deepEqual(seenProjectManifestStates, [true]);
+    assert.match(result.stdout, /Updated agentics repo/);
+    assert.match(result.stdout, /Usable: focus/);
+    assert.deepEqual(JSON.parse(await readFile(configPath(context.homeDir), "utf8")), {
+      agenticsRepo: newAgenticsRepoDir,
+      defaultTool: "codex",
+    });
+    await assertJsonFile(join(context.projectDir, "jawfish.json"), {
+      jawfish: { existing: { tool: "codex" } },
+    });
+    await stat(join(oldAgenticsRepoDir, "README.md"));
+  });
+
+  test("interactive init reinitialize menu installs starters and imports skills", async () => {
+    const context = await setup();
+    const agenticsRepoDir = join(context.rootDir, "agentics");
+    const actions: Array<"global-starters" | "import-skills" | "done"> = [
+      "global-starters",
+      "import-skills",
+      "done",
+    ];
+
+    await createGitRepository(agenticsRepoDir);
+    await writeIndexedFocusSkill(agenticsRepoDir);
+    await mkdir(join(context.homeDir, ".codex", "skills", "imported"), {
+      recursive: true,
+    });
+    await writeFile(
+      join(context.homeDir, ".codex", "skills", "imported", "SKILL.md"),
+      "# Imported\n",
+    );
+    await writeFile(
+      configPath(context.homeDir),
+      `${JSON.stringify({
+        agenticsRepo: agenticsRepoDir,
+        defaultTool: "codex",
+      })}\n`,
+    );
+
+    const prompts: InitCommandPrompts = {
+      inputAgenticsRepo: async () => {
+        throw new Error("unexpected repo path prompt");
+      },
+      selectAgenticsRepoMode: async () => {
+        throw new Error("unexpected repo mode prompt");
+      },
+      selectDefaultTool: async () => {
+        throw new Error("unexpected default tool prompt");
+      },
+      selectExistingMachineInitAction: async () => "reinitialize",
+      selectGlobalStarterAgentics: async (inspection) => {
+        assert.deepEqual(inspection.usableNames, ["focus"]);
+        return ["focus"];
+      },
+      selectImportProviders: async () => ["codex"],
+      selectMachineReinitializeAction: async () => {
+        const action = actions.shift();
+        assert.ok(action);
+        return action;
+      },
+      selectProjectAgentics: async () => {
+        throw new Error("unexpected project setup prompt");
+      },
+    };
+
+    const result = await captureConsole(() =>
+      initCommand(initArgs(), {
+        cwd: context.projectDir,
+        env: {
+          CODEX_HOME: join(context.homeDir, ".codex"),
+          HOME: context.homeDir,
+          JAWFISH_HOME: context.homeDir,
+        },
+        prompts,
+      }),
+    );
+
+    assert.equal(result.result, 0, result.stderr);
+    assert.match(result.stdout, /Installed focus globally/);
+    assert.match(result.stdout, /Imported 1 skills from codex/);
+    await assertJsonFile(join(context.homeDir, "jawfish.json"), {
+      jawfish: {
+        focus: { tool: "codex" },
+        imported: { tool: "codex" },
+      },
+    });
+    await assertJsonFile(join(agenticsRepoDir, "index.json"), {
+      focus: {
+        description: "Focus workflow",
+        path: "skills/focus",
+        type: "skill",
+      },
+      imported: {
+        description: "",
+        path: "skills/imported",
+        type: "skill",
+      },
     });
   });
 
