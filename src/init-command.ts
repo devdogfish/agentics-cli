@@ -1,6 +1,6 @@
 import { cancel, isCancel, multiselect } from "@clack/prompts";
-import { mkdir, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { mkdir } from "node:fs/promises";
+import { isAbsolute, join, resolve } from "node:path";
 import {
   configureAgenticsRepoGitUser,
   ensureAgenticsRepoIgnore,
@@ -24,6 +24,7 @@ import { exists } from "./files.ts";
 import {
   installManifestEntry,
   readManifest,
+  writeJson,
   type Manifest,
 } from "./install.ts";
 import { runCommand } from "./process.ts";
@@ -101,9 +102,7 @@ function firstSupportedTool(): string {
 }
 
 async function initializeLocalAgenticsRepo(agenticsRepo: string): Promise<void> {
-  const agenticsRepoDir = isAbsolute(agenticsRepo)
-    ? agenticsRepo
-    : resolve(process.cwd(), agenticsRepo);
+  const agenticsRepoDir = resolveAgenticsRepoPath(agenticsRepo);
 
   await mkdir(agenticsRepoDir, { recursive: true });
   if (!(await exists(join(agenticsRepoDir, ".git")))) {
@@ -146,8 +145,7 @@ async function ensureManifest(path: string): Promise<void> {
     return;
   }
 
-  await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, `${JSON.stringify({ jawfish: {} }, null, 2)}\n`);
+  await writeJson(path, { jawfish: {} });
 }
 
 async function runProjectSetup(config: JawfishConfig): Promise<void> {
@@ -165,10 +163,6 @@ async function runProjectSetup(config: JawfishConfig): Promise<void> {
   }
 
   const selected = await selectProjectAgentics(inspection, manifest);
-  if (selected === undefined) {
-    return;
-  }
-
   if (selected.length === 0) {
     await ensureProjectManifest();
     console.log("No project agentics selected");
@@ -186,7 +180,7 @@ async function runProjectSetup(config: JawfishConfig): Promise<void> {
 async function selectProjectAgentics(
   inspection: AgenticsRepoInspection,
   manifest: Manifest,
-): Promise<string[] | undefined> {
+): Promise<string[]> {
   const selected = await multiselect({
     message: "Select project agentics",
     options: inspection.usable.map(({ entry, name }) => ({
@@ -236,9 +230,7 @@ async function printAgenticsRepoInspection(
     return;
   }
 
-  const agenticsRepoDir = isAbsolute(agenticsRepo)
-    ? agenticsRepo
-    : resolve(process.cwd(), agenticsRepo);
+  const agenticsRepoDir = resolveAgenticsRepoPath(agenticsRepo);
   const inspection = await inspectAgenticsRepo(agenticsRepoDir);
   printInspection(inspection);
 }
