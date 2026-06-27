@@ -25,99 +25,73 @@ export type DestinationSpec =
   | { kind: "directory"; path: string }
   | { extension: ".md"; kind: "file"; path: string };
 
+type DirectoryDestinationSpec = Extract<DestinationSpec, { kind: "directory" }>;
+type MarkdownFileDestinationSpec = Extract<DestinationSpec, { kind: "file" }>;
+type ProviderRoot = (scope: InstallScope, paths: ToolPaths) => string;
+type DestinationResolver = (
+  name: string,
+  type: AgenticType,
+  scope: InstallScope,
+  paths: ToolPaths,
+) => DestinationSpec;
+
 interface ToolAdapter {
-  destination: (
-    name: string,
-    type: AgenticType,
-    scope: InstallScope,
-    paths: ToolPaths,
-  ) => DestinationSpec;
+  providerRoot: ProviderRoot;
+  destination: DestinationResolver;
 }
 
 const adapters = {
-  codex: {
-    destination: (name, type, scope, paths) => ({
-      kind: "directory",
-      path: join(codexRoot(scope, paths), typeFolder(type), name),
-    }),
-  },
-  "claude-code": {
-    destination: (name, type, scope, paths) => ({
-      kind: "directory",
-      path: join(scopeRoot(scope, paths), ".claude", typeFolder(type), name),
-    }),
-  },
-  hermes: {
-    destination: (name, type, scope, paths) => ({
-      kind: "directory",
-      path: join(scopeRoot(scope, paths), ".hermes", typeFolder(type), name),
-    }),
-  },
+  codex: directoryAdapter(codexRoot),
+  "claude-code": directoryAdapter(claudeCodeRoot),
+  hermes: directoryAdapter(hermesRoot),
   openclaw: {
+    providerRoot: openclawRoot,
     destination: (name, type, scope, paths) => {
       if (type !== "skill") {
         throw new Error("OpenClaw supports only skill packages");
       }
 
-      return {
-        kind: "directory",
-        path: join(openclawRoot(scope, paths), "skills", name),
-      };
+      const root = openclawRoot(scope, paths);
+      return directorySpec(join(skillRoot(root), name));
     },
   },
   opencode: {
+    providerRoot: opencodeRoot,
     destination: (name, type, scope, paths) => {
       const root = opencodeRoot(scope, paths);
       switch (type) {
         case "agent":
-          return {
-            extension: ".md",
-            kind: "file",
-            path: join(root, "agents", `${name}.md`),
-          };
+          return markdownFileSpec(join(root, "agents", `${name}.md`));
         case "prompt":
-          return {
-            extension: ".md",
-            kind: "file",
-            path: join(root, "commands", `${name}.md`),
-          };
+          return markdownFileSpec(join(root, "commands", `${name}.md`));
         case "skill":
-          return {
-            kind: "directory",
-            path: join(root, "skills", name),
-          };
+          return directorySpec(join(skillRoot(root), name));
       }
     },
   },
   pi: {
+    providerRoot: piRoot,
     destination: (name, type, scope, paths) => {
       const root = piRoot(scope, paths);
       switch (type) {
         case "agent":
-          return {
-            kind: "directory",
-            path: join(root, "extensions", name),
-          };
+          return directorySpec(join(root, "extensions", name));
         case "prompt":
-          return {
-            extension: ".md",
-            kind: "file",
-            path: join(root, "prompts", `${name}.md`),
-          };
+          return markdownFileSpec(join(root, "prompts", `${name}.md`));
         case "skill":
-          return {
-            kind: "directory",
-            path: join(root, "skills", name),
-          };
+          return directorySpec(join(skillRoot(root), name));
       }
     },
   },
 } satisfies Record<SupportedTool, ToolAdapter>;
 
-export function assertSupportedTool(tool: string): asserts tool is SupportedTool {
+export function assertSupportedTool(
+  tool: string,
+  source = "tool",
+): asserts tool is SupportedTool {
   if (!isSupportedTool(tool)) {
     throw new Error(
-      `Unsupported tool: ${tool}. Supported tools: ${supportedTools.join(", ")}`,
+      `Unsupported ${source}: ${tool}. Supported tools: ${supportedTools.join(", ")}`,
     );
   }
 }
@@ -147,6 +121,15 @@ export function destinationSpec(
   return adapters[tool].destination(name, type, scope, paths);
 }
 
+export function sourceProviderSkillRoot(
+  tool: string,
+  scope: InstallScope,
+  paths: ToolPaths,
+): string {
+  assertSupportedTool(tool);
+  return skillRoot(adapters[tool].providerRoot(scope, paths));
+}
+
 export function typeFolder(type: AgenticType): string {
   switch (type) {
     case "agent":
@@ -162,8 +145,40 @@ function scopeRoot(scope: InstallScope, paths: ToolPaths): string {
   return scope === "project" ? paths.projectDir : paths.homeDir;
 }
 
+function directoryAdapter(providerRoot: ProviderRoot): ToolAdapter {
+  return {
+    providerRoot,
+    destination: directoryDestination(providerRoot),
+  };
+}
+
+function directoryDestination(providerRoot: ProviderRoot): DestinationResolver {
+  return (name, type, scope, paths) =>
+    directorySpec(join(providerRoot(scope, paths), typeFolder(type), name));
+}
+
+function directorySpec(path: string): DirectoryDestinationSpec {
+  return { kind: "directory", path };
+}
+
+function markdownFileSpec(path: string): MarkdownFileDestinationSpec {
+  return { extension: ".md", kind: "file", path };
+}
+
+function skillRoot(providerRoot: string): string {
+  return join(providerRoot, typeFolder("skill"));
+}
+
 function codexRoot(scope: InstallScope, paths: ToolPaths): string {
   return scope === "project" ? join(paths.projectDir, ".codex") : paths.codexHome;
+}
+
+function claudeCodeRoot(scope: InstallScope, paths: ToolPaths): string {
+  return join(scopeRoot(scope, paths), ".claude");
+}
+
+function hermesRoot(scope: InstallScope, paths: ToolPaths): string {
+  return join(scopeRoot(scope, paths), ".hermes");
 }
 
 function openclawRoot(scope: InstallScope, paths: ToolPaths): string {

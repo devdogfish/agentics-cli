@@ -23,7 +23,6 @@ import {
 } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  assertSupportedConfiguredTool,
   defaultSupportedTools,
   loadConfig,
   saveConfig,
@@ -56,6 +55,7 @@ import {
   type CatalogEntry,
 } from "./catalog.ts";
 import {
+  assertSupportedTool,
   typeFolder,
   type AgenticType,
   type InstallScope,
@@ -279,7 +279,7 @@ async function installCommand(args: CommandArgs): Promise<number> {
   const manifest = await readManifest(scope);
   const installPlan = Object.entries(manifest.jawfish).map(([name, entry]) => {
     const tool = entry.tool;
-    assertSupportedConfiguredTool(tool, `manifest entry "${name}"`);
+    assertSupportedTool(tool, `manifest entry "${name}"`);
     if (!catalogHasAgentic(catalog, name)) {
       throw new Error(`Unknown agentic: ${name}`);
     }
@@ -331,7 +331,7 @@ async function listCommand(args: CommandArgs): Promise<number> {
 async function importSkillsCommand(args: CommandArgs): Promise<number> {
   const provider = args.positionals[0]!;
 
-  assertSupportedConfiguredTool(provider, "provider");
+  assertSupportedTool(provider, "provider");
 
   const config = await loadConfig({ promptForMissingDefaultTool: false });
   const session = await openAgenticsRepoSession(config);
@@ -395,7 +395,7 @@ async function removeCommand(args: CommandArgs): Promise<number> {
   }
 
   if (catalogEntry !== undefined) {
-    assertSupportedConfiguredTool(
+    assertSupportedTool(
       manifestEntry.tool,
       `manifest entry "${name}"`,
     );
@@ -1528,7 +1528,7 @@ async function installedManifestEntry(
   const manifest = await readManifest(scope);
   const entry = manifest.jawfish[name];
   if (entry !== undefined) {
-    assertSupportedConfiguredTool(entry.tool, `manifest entry "${name}"`);
+    assertSupportedTool(entry.tool, `manifest entry "${name}"`);
   }
 
   return entry;
@@ -1536,7 +1536,7 @@ async function installedManifestEntry(
 
 async function resolveTool(config: JawfishConfig): Promise<string> {
   if (config.defaultTool !== undefined) {
-    assertSupportedConfiguredTool(config.defaultTool, "config defaultTool");
+    assertSupportedTool(config.defaultTool, "config defaultTool");
     return config.defaultTool;
   }
 
@@ -1545,7 +1545,7 @@ async function resolveTool(config: JawfishConfig): Promise<string> {
     throw new Error("No default tool selected");
   }
 
-  assertSupportedConfiguredTool(selected, "selected default tool");
+  assertSupportedTool(selected, "selected default tool");
   config.defaultTool = selected;
   await saveConfig(config);
   return selected;
