@@ -34,11 +34,11 @@ import { initCommand } from "./init-command.ts";
 import {
   assertCanMaterializePackage,
   installManifestEntry,
-  managedMarkerFile,
   materialize,
   readManifest,
   removeMaterialized,
   resolveInside,
+  stripMaterializationMetadata,
   writeManifest,
   type Manifest,
   type ManifestEntry,
@@ -516,6 +516,7 @@ async function importPackage(
   await rm(destination, { force: true, recursive: true });
   await mkdir(dirname(destination), { recursive: true });
   await cp(acquired.packagePath, destination, { recursive: true });
+  await stripMaterializationMetadata(destination);
 
   catalog.jawfish[name] = {
     description: "",
@@ -662,7 +663,7 @@ async function importRepoSkillCandidate(
   await rm(destination, { force: true, recursive: true });
   await mkdir(dirname(destination), { recursive: true });
   await cp(candidate.sourcePath, destination, { recursive: true });
-  await rm(join(destination, managedMarkerFile), { force: true });
+  await stripMaterializationMetadata(destination);
 
   catalog.jawfish[name] = {
     description: "",

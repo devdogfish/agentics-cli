@@ -4,11 +4,10 @@ import { writeCatalog, type Catalog } from "./catalog.ts";
 import { exists } from "./files.ts";
 import { inferredLocalGitUpstream } from "./git-source.ts";
 import {
-  installedFiles,
-  managedMarkerFile,
+  adoptMaterialized,
   readManifest,
   resolveInside,
-  writeJson,
+  stripMaterializationMetadata,
   writeManifest,
 } from "./install.ts";
 import {
@@ -185,7 +184,7 @@ export async function applySkillImport(
     await rm(destination, { force: true, recursive: true });
     await mkdir(dirname(destination), { recursive: true });
     await cp(skill.path, destination, { recursive: true });
-    await rm(join(destination, managedMarkerFile), { force: true });
+    await stripMaterializationMetadata(destination);
 
     catalog.jawfish[skill.name] = {
       description: "",
@@ -194,7 +193,13 @@ export async function applySkillImport(
       ...(skill.upstream === undefined ? {} : { upstream: skill.upstream }),
     };
     manifest.jawfish[skill.name] = { tool: provider };
-    await adoptGlobalSkill(skill, provider);
+    await adoptMaterialized(
+      skill.name,
+      "skill",
+      manifestScope,
+      provider,
+      options,
+    );
   }
 
   await writeManifest(manifestScope, manifest, options);
@@ -333,16 +338,4 @@ function formatSummaryNames(names: string[]): string {
   }
 
   return names.join(", ");
-}
-
-async function adoptGlobalSkill(
-  skill: DiscoveredSkill,
-  provider: string,
-): Promise<void> {
-  await writeJson(join(skill.path, managedMarkerFile), {
-    files: (await installedFiles(skill.path)).sort(),
-    name: skill.name,
-    tool: provider,
-    type: "skill",
-  });
 }
