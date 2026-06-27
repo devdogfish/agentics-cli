@@ -59,6 +59,8 @@ test("source intake normalizes GitHub blob file URLs to raw URLs", () => {
 test("source intake matches raw GitHub skill files to repo skill upstreams", () => {
   const raw =
     "https://raw.githubusercontent.com/mattpocock/skills/main/skills/productivity/handoff/SKILL.md";
+  const githubRaw =
+    "https://github.com/mattpocock/skills/raw/main/skills/productivity/handoff/SKILL.md";
   const blob =
     "https://github.com/mattpocock/skills/blob/main/skills/productivity/handoff/SKILL.md";
   const tree =
@@ -75,6 +77,7 @@ test("source intake matches raw GitHub skill files to repo skill upstreams", () 
   };
 
   assert.equal(isSameUpstream(raw, tree), true);
+  assert.equal(isSameUpstream(githubRaw, tree), true);
   assert.equal(isSameUpstream(blob, tree), true);
   assert.equal(catalogNameForUpstream(catalog, tree), "renamed-handoff");
 });

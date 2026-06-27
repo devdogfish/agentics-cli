@@ -79,6 +79,14 @@ interface GitFragmentSource {
   source: string;
 }
 
+interface GitHubSkillIdentitySource {
+  kind: "blob" | "raw" | "tree";
+  owner: string;
+  path: string;
+  ref: string;
+  repo: string;
+}
+
 interface UrlResponse {
   body: Buffer;
   contentType: string;
@@ -180,7 +188,7 @@ export function repoSkillCandidatesByRelativePath(
 ): RepoSkillCandidate[] {
   const selectedPaths = new Set(relativePaths);
   return plan.candidates.filter((candidate) =>
-    selectedPaths.has(candidate.relativePath)
+    selectedPaths.has(candidate.relativePath),
   );
 }
 
@@ -210,9 +218,7 @@ export function assertRepoSkillSelection(
     .filter((candidate) => candidate.conflict)
     .map((candidate) => candidate.name);
   if (conflicts.length > 0) {
-    throw new Error(
-      `Repo skill name conflicts: ${conflicts.join(", ")}`,
-    );
+    throw new Error(`Repo skill name conflicts: ${conflicts.join(", ")}`);
   }
 }
 
@@ -253,36 +259,89 @@ function normalizeUpstreamUrl(source: string): string {
 }
 
 function githubSkillUpstreamIdentity(source: string): string | undefined {
-  const url = new URL(source);
-  const raw = url.hostname === "raw.githubusercontent.com";
-  if (!raw && url.hostname !== "github.com") {
+  const parsed = parseGitHubSkillIdentitySource(new URL(source));
+  if (parsed === undefined) {
     return undefined;
   }
 
-  const parts = url.pathname.split("/").filter(Boolean);
-  const [owner, rawRepo] = parts;
-  const kind = raw ? "raw" : parts[2];
-  const ref = raw ? parts[2] : parts[3];
-  const pathParts = raw ? parts.slice(3) : parts.slice(4);
-  if (owner === undefined || rawRepo === undefined || ref === undefined) {
-    return undefined;
-  }
-
-  const path = normalizePath(pathParts.join("/"));
-  const relativePath = kind === "tree" ? path : skillFileParentPath(path);
-  if (
-    (kind !== "raw" && kind !== "blob" && kind !== "tree") ||
-    relativePath === undefined
-  ) {
+  const relativePath = githubSkillRelativePath(parsed);
+  if (relativePath === undefined) {
     return undefined;
   }
 
   return githubSkillIdentity(
-    owner,
-    rawRepo.replace(/\.git$/u, ""),
-    ref,
+    parsed.owner,
+    parsed.repo,
+    parsed.ref,
     relativePath,
   );
+}
+
+function parseGitHubSkillIdentitySource(
+  url: URL,
+): GitHubSkillIdentitySource | undefined {
+  if (url.hostname === "raw.githubusercontent.com") {
+    return parseRawGitHubSkillIdentitySource(url);
+  }
+
+  if (url.hostname === "github.com") {
+    return parseGitHubDotComSkillIdentitySource(url);
+  }
+
+  return undefined;
+}
+
+function parseRawGitHubSkillIdentitySource(
+  url: URL,
+): GitHubSkillIdentitySource | undefined {
+  const [owner, rawRepo, ref, ...pathParts] = url.pathname
+    .split("/")
+    .filter(Boolean);
+  if (owner === undefined || rawRepo === undefined || ref === undefined) {
+    return undefined;
+  }
+
+  return {
+    kind: "raw",
+    owner,
+    path: normalizePath(pathParts.join("/")),
+    ref,
+    repo: rawRepo.replace(/\.git$/u, ""),
+  };
+}
+
+function parseGitHubDotComSkillIdentitySource(
+  url: URL,
+): GitHubSkillIdentitySource | undefined {
+  const [owner, rawRepo, kind, ref, ...pathParts] = url.pathname
+    .split("/")
+    .filter(Boolean);
+  if (
+    owner === undefined ||
+    rawRepo === undefined ||
+    ref === undefined ||
+    (kind !== "blob" && kind !== "raw" && kind !== "tree")
+  ) {
+    return undefined;
+  }
+
+  return {
+    kind,
+    owner,
+    path: normalizePath(pathParts.join("/")),
+    ref,
+    repo: rawRepo.replace(/\.git$/u, ""),
+  };
+}
+
+function githubSkillRelativePath(
+  source: GitHubSkillIdentitySource,
+): string | undefined {
+  if (source.kind === "tree") {
+    return source.path;
+  }
+
+  return skillFileParentPath(source.path);
 }
 
 function githubSkillIdentity(
@@ -343,15 +402,14 @@ export function normalizeSourceUrl(source: string): string {
   return `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${path.join("/")}`;
 }
 
-function repoSkillCandidates(
+async function repoSkillCandidates(
   catalog: Catalog,
   repoSource: RepoSource,
 ): Promise<RepoSkillCandidate[]> {
-  return findSkillDirectories(repoSource.rootPath).then((skillDirs) =>
-    skillDirs
-      .map((sourcePath) => repoSkillCandidate(catalog, repoSource, sourcePath))
-      .sort((left, right) => left.name.localeCompare(right.name))
-  );
+  const skillDirs = await findSkillDirectories(repoSource.rootPath);
+  return skillDirs
+    .map((sourcePath) => repoSkillCandidate(catalog, repoSource, sourcePath))
+    .sort((left, right) => left.name.localeCompare(right.name));
 }
 
 function repoSkillCandidate(
@@ -487,7 +545,11 @@ async function acquireGitHubRepoSource(
   parsed: ParsedGitHubSource,
 ): Promise<GitHubRepoSource> {
   const tempDir = await mkdtemp(join(tmpdir(), "jawfish-repo-"));
-  await runCommand("git", ["clone", "--quiet", parsed.repoUrl, tempDir], process.cwd());
+  await runCommand(
+    "git",
+    ["clone", "--quiet", parsed.repoUrl, tempDir],
+    process.cwd(),
+  );
   if (parsed.ref !== undefined) {
     await runCommand("git", ["checkout", "--quiet", parsed.ref], tempDir);
   }
@@ -584,7 +646,11 @@ async function acquireGitFragmentSource(
   }
 
   const tempDir = await mkdtemp(join(tmpdir(), "jawfish-repo-"));
-  await runCommand("git", ["clone", "--quiet", fragment.source, tempDir], process.cwd());
+  await runCommand(
+    "git",
+    ["clone", "--quiet", fragment.source, tempDir],
+    process.cwd(),
+  );
   const packagePath = join(tempDir, fragment.relativePath);
   return {
     inferredName: inferPackageName(packagePath),
