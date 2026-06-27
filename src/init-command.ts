@@ -167,6 +167,12 @@ function initContext(options: InitCommandOptions): InitContext {
   };
 }
 
+function pathOptions(
+  context: InitContext,
+): { cwd: string; env: NodeJS.ProcessEnv } {
+  return { cwd: context.cwd, env: context.env };
+}
+
 const defaultInitPrompts: InitCommandPrompts = {
   inputAgenticsRepo: promptForAgenticsRepo,
   inputAgenticsRepoLocalPath: promptForAgenticsRepoLocalPath,
@@ -315,10 +321,7 @@ async function prepareAgenticsRepo(
   selection: AgenticsRepoSelection,
   context: InitContext,
 ): Promise<void> {
-  await prepareAgenticsRepoSelection(selection, {
-    cwd: context.cwd,
-    env: context.env,
-  });
+  await prepareAgenticsRepoSelection(selection, pathOptions(context));
 }
 
 async function ensureGlobalManifest(context: InitContext): Promise<void> {
@@ -338,10 +341,7 @@ async function validateMachineSetup(context: InitContext): Promise<JawfishConfig
     return config;
   }
 
-  assertAgenticsRepoPathSupported(config.agenticsRepo, {
-    cwd: context.cwd,
-    env: context.env,
-  });
+  assertAgenticsRepoPathSupported(config.agenticsRepo, pathOptions(context));
   return config;
 }
 
@@ -524,13 +524,13 @@ async function importSelectedSkills(
   session: AgenticsRepoSession,
   context: InitContext,
 ): Promise<void> {
-  const pathOptions = { cwd: context.cwd, env: context.env };
+  const options = pathOptions(context);
   const catalog = await session.readCatalog();
   const discovery = await discoverImportableSkills(
     defaultSupportedTools,
     ["global", "project"],
     catalog,
-    pathOptions,
+    options,
   );
 
   if (discovery.candidates.length === 0) {
@@ -562,7 +562,7 @@ async function importSelectedSkills(
     return;
   }
 
-  await applySelectedSkillImports(session.dir, catalog, selected, pathOptions);
+  await applySelectedSkillImports(session.dir, catalog, selected, options);
   await session.writeCatalog(catalog);
   if (!(await session.pushChanges("import skills"))) {
     throw new Error("Import failed");
@@ -582,12 +582,12 @@ async function importSelectedProviders(
   const selectedProviderNames = await prompt(defaultSupportedTools);
   assertSelectedImportProvidersSupported(selectedProviderNames);
 
-  const pathOptions = { cwd: context.cwd, env: context.env };
+  const options = pathOptions(context);
   for (const provider of selectedProviderNames) {
     const result = await importProviderSkillsToSession(
       session,
       provider,
-      pathOptions,
+      options,
     );
     if (result !== 0) {
       throw new Error(`Import failed for ${provider}`);
@@ -601,8 +601,8 @@ async function installSelectedGlobalStarters(
   inspection: AgenticsRepoInspection,
   context: InitContext,
 ): Promise<void> {
-  const pathOptions = { cwd: context.cwd, env: context.env };
-  const manifest = await readManifest("global", pathOptions);
+  const options = pathOptions(context);
+  const manifest = await readManifest("global", options);
   const selected = await selectGlobalStarterAgentics(context, inspection, manifest);
   if (selected.length === 0) {
     console.log("No global starter agentics selected");
@@ -620,7 +620,7 @@ async function installSelectedGlobalStarters(
       name,
       "global",
       tool,
-      pathOptions,
+      options,
     );
     console.log(`Installed ${name} globally`);
   }
@@ -645,8 +645,8 @@ async function runProjectSetup(
 ): Promise<void> {
   const session = await configuredAgenticsRepoSession(config, context);
   const inspection = await session.inspect();
-  const pathOptions = { cwd: context.cwd, env: context.env };
-  const manifest = await readManifest("project", pathOptions);
+  const options = pathOptions(context);
+  const manifest = await readManifest("project", options);
 
   console.log(
     `Initialized project at ${manifestPath("project", context.env, context.cwd)}`,
@@ -677,7 +677,7 @@ async function runProjectSetup(
       name,
       "project",
       tool,
-      pathOptions,
+      options,
     );
     console.log(`Installed ${name} to project`);
   }
@@ -881,10 +881,7 @@ async function configuredAgenticsRepoDir(
   context: InitContext,
 ): Promise<string> {
   const agenticsRepo = configuredAgenticsRepo(config, context);
-  return await inspectionAgenticsRepoDir(agenticsRepo, {
-    cwd: context.cwd,
-    env: context.env,
-  });
+  return await inspectionAgenticsRepoDir(agenticsRepo, pathOptions(context));
 }
 
 async function configuredAgenticsRepoSession(
@@ -909,10 +906,7 @@ async function printAgenticsRepoInspection(
   }
 
   const session = createAgenticsRepoSession(
-    await inspectionAgenticsRepoDir(agenticsRepo, {
-      cwd: context.cwd,
-      env: context.env,
-    }),
+    await inspectionAgenticsRepoDir(agenticsRepo, pathOptions(context)),
   );
   printInspection(await session.inspect());
 }
@@ -921,10 +915,10 @@ async function printAgenticsRepoLocation(
   agenticsRepo: string,
   context: InitContext,
 ): Promise<void> {
-  const agenticsRepoDir = await inspectionAgenticsRepoDir(agenticsRepo, {
-    cwd: context.cwd,
-    env: context.env,
-  });
+  const agenticsRepoDir = await inspectionAgenticsRepoDir(
+    agenticsRepo,
+    pathOptions(context),
+  );
   console.log(`Agentics repo local: ${agenticsRepoDir}`);
 
   const remote = await agenticsRepoOriginRemote(agenticsRepoDir);

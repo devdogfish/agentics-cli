@@ -56,6 +56,12 @@ export interface ImportSkillsSkip {
   reason: string;
 }
 
+interface ProviderSkillImportTarget {
+  dir: string;
+  pushChanges: (message: string) => Promise<boolean>;
+  writeCatalog: (catalog: Catalog) => Promise<void>;
+}
+
 export async function planSkillImport(
   sourceRoot: string,
   catalog: Catalog,
@@ -220,24 +226,17 @@ export async function importProviderSkills(
   provider: string,
   options: PathOptions = {},
 ): Promise<number> {
-  const sourceRoot = globalSkillRoot(provider, options);
-  const plan = await planSkillImport(sourceRoot, catalog);
-
-  printImportSkillsPlan(provider, sourceRoot, plan);
-
-  if (plan.imported.length === 0) {
-    console.log("No importable skills found");
-    return 0;
-  }
-
-  await applySkillImport(agenticsRepoDir, catalog, provider, plan.imported, options);
-  await writeCatalog(agenticsRepoDir, catalog);
-  if (!(await pushAgenticsRepoChanges(agenticsRepoDir, `import skills from ${provider}`))) {
-    return 1;
-  }
-
-  console.log(`Imported ${plan.imported.length} skills from ${provider}`);
-  return 0;
+  return await importProviderSkillsToTarget(
+    {
+      dir: agenticsRepoDir,
+      pushChanges: (message) =>
+        pushAgenticsRepoChanges(agenticsRepoDir, message),
+      writeCatalog: (catalog) => writeCatalog(agenticsRepoDir, catalog),
+    },
+    catalog,
+    provider,
+    options,
+  );
 }
 
 export async function importProviderSkillsToSession(
@@ -246,6 +245,15 @@ export async function importProviderSkillsToSession(
   options: PathOptions = {},
 ): Promise<number> {
   const catalog = await session.readCatalog();
+  return await importProviderSkillsToTarget(session, catalog, provider, options);
+}
+
+async function importProviderSkillsToTarget(
+  target: ProviderSkillImportTarget,
+  catalog: Catalog,
+  provider: string,
+  options: PathOptions,
+): Promise<number> {
   const sourceRoot = globalSkillRoot(provider, options);
   const plan = await planSkillImport(sourceRoot, catalog);
 
@@ -256,9 +264,9 @@ export async function importProviderSkillsToSession(
     return 0;
   }
 
-  await applySkillImport(session.dir, catalog, provider, plan.imported, options);
-  await session.writeCatalog(catalog);
-  if (!(await session.pushChanges(`import skills from ${provider}`))) {
+  await applySkillImport(target.dir, catalog, provider, plan.imported, options);
+  await target.writeCatalog(catalog);
+  if (!(await target.pushChanges(`import skills from ${provider}`))) {
     return 1;
   }
 

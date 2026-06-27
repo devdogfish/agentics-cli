@@ -59,6 +59,11 @@ export interface AgenticsRepoSessionOptions {
   env?: NodeJS.ProcessEnv;
 }
 
+interface AgenticsRepoContext {
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+}
+
 export interface AgenticsRepoSelection {
   createIfMissing: boolean;
   localPath: string;
@@ -90,8 +95,7 @@ export async function resolveAgenticsRepoDir(
   config: JawfishConfig,
   options: AgenticsRepoSessionOptions = {},
 ): Promise<string> {
-  const cwd = options.cwd ?? process.cwd();
-  const env = options.env ?? process.env;
+  const { cwd, env } = agenticsRepoContext(options);
 
   if (config.agenticsRepo === undefined || config.agenticsRepo === "") {
     const agenticsRepoDir = managedAgenticsRepoPath(env);
@@ -110,7 +114,7 @@ export async function resolveAgenticsRepoDir(
   }
 
   const agenticsRepoDir = managedAgenticsRepoPath(env);
-  if (await exists(join(agenticsRepoDir, ".git"))) {
+  if (await hasGitRepository(agenticsRepoDir)) {
     await prepareExistingAgenticsRepo(agenticsRepoDir);
     return agenticsRepoDir;
   }
@@ -123,7 +127,7 @@ export async function prepareAgenticsRepoSelection(
   selection: AgenticsRepoSelection,
   options: AgenticsRepoSessionOptions = {},
 ): Promise<string> {
-  const cwd = options.cwd ?? process.cwd();
+  const { cwd } = agenticsRepoContext(options);
   const localPath = resolveConfiguredAgenticsRepoPath(selection.localPath, cwd);
 
   if (selection.remoteSource === undefined) {
@@ -141,7 +145,7 @@ export async function prepareAgenticsRepoSelection(
 }
 
 export async function syncAgenticsRepo(agenticsRepoDir: string): Promise<void> {
-  if (!(await exists(join(agenticsRepoDir, ".git")))) {
+  if (!(await hasGitRepository(agenticsRepoDir))) {
     return;
   }
 
@@ -161,7 +165,7 @@ export async function syncAgenticsRepo(agenticsRepoDir: string): Promise<void> {
 export async function agenticsRepoOriginRemote(
   agenticsRepoDir: string,
 ): Promise<string | undefined> {
-  if (!(await exists(join(agenticsRepoDir, ".git")))) {
+  if (!(await hasGitRepository(agenticsRepoDir))) {
     return undefined;
   }
 
@@ -182,8 +186,7 @@ export async function inspectionAgenticsRepoDir(
   agenticsRepo: string,
   options: AgenticsRepoSessionOptions = {},
 ): Promise<string> {
-  const cwd = options.cwd ?? process.cwd();
-  const env = options.env ?? process.env;
+  const { cwd, env } = agenticsRepoContext(options);
   const configured = resolveConfiguredAgenticsRepoPath(agenticsRepo, cwd);
   if ((await exists(configured)) && !(await isBareAgenticsRepo(configured))) {
     return configured;
@@ -196,8 +199,7 @@ export function assertAgenticsRepoPathSupported(
   agenticsRepo: string,
   options: AgenticsRepoSessionOptions = {},
 ): void {
-  const cwd = options.cwd ?? process.cwd();
-  const env = options.env ?? process.env;
+  const { cwd, env } = agenticsRepoContext(options);
   const configured = resolveConfiguredAgenticsRepoPath(agenticsRepo, cwd);
   assertNotDeprecatedAgenticsRepoPath(configured, env);
 }
@@ -228,6 +230,15 @@ export async function isBareAgenticsRepo(path: string): Promise<boolean> {
     false,
   );
   return result.exitCode === 0 && result.stdout.trim() === "true";
+}
+
+function agenticsRepoContext(
+  options: AgenticsRepoSessionOptions = {},
+): AgenticsRepoContext {
+  return {
+    cwd: options.cwd ?? process.cwd(),
+    env: options.env ?? process.env,
+  };
 }
 
 export async function configureAgenticsRepoGitUser(
@@ -266,7 +277,7 @@ async function initializeLocalAgenticsRepo(
 async function prepareExistingAgenticsRepo(
   agenticsRepoDir: string,
 ): Promise<void> {
-  if (await exists(join(agenticsRepoDir, ".git"))) {
+  if (await hasGitRepository(agenticsRepoDir)) {
     await configureAgenticsRepoGitUser(agenticsRepoDir);
   }
 
@@ -303,7 +314,7 @@ async function initializeRemoteAgenticsRepo(
 
 async function ensureGitRepository(agenticsRepoDir: string): Promise<void> {
   await mkdir(agenticsRepoDir, { recursive: true });
-  if (!(await exists(join(agenticsRepoDir, ".git")))) {
+  if (!(await hasGitRepository(agenticsRepoDir))) {
     await runCommand("git", ["init"], agenticsRepoDir);
   }
 
@@ -340,6 +351,10 @@ async function remoteDefaultBranch(
   }
 
   return match[1];
+}
+
+async function hasGitRepository(agenticsRepoDir: string): Promise<boolean> {
+  return await exists(join(agenticsRepoDir, ".git"));
 }
 
 function assertNotDeprecatedAgenticsRepoPath(
@@ -521,7 +536,7 @@ async function commitAndPush(
   agenticsRepoDir: string,
   message: string,
 ): Promise<PushResult> {
-  if (!(await exists(join(agenticsRepoDir, ".git")))) {
+  if (!(await hasGitRepository(agenticsRepoDir))) {
     return { ok: true };
   }
 
