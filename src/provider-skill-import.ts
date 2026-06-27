@@ -78,6 +78,9 @@ interface ProviderSkillImportTarget {
   writeCatalog: (catalog: Catalog) => Promise<void>;
 }
 
+const catalogConflictReason = "catalog conflict";
+const duplicateDiscoveredSkillReason = "duplicate discovered skill name";
+
 export async function planSkillImport(
   sourceRoot: string,
   catalog: Catalog,
@@ -139,57 +142,12 @@ export async function discoverImportableSkills(
     for (const scope of scopes) {
       const sourceRoot = skillRoot(provider, scope, options);
       const plan = await planSkillImport(sourceRoot, catalog);
-      discovery.candidates.push(
-        ...plan.imported.map((skill) => ({
-          ...skill,
-          id: importableSkillId(provider, scope, skill.name),
-          provider,
-          scope,
-        })),
-      );
-      discovery.conflicts.push(
-        ...plan.conflicts.map((name) => ({
-          name,
-          provider,
-          reason: "catalog conflict",
-          scope,
-        })),
-      );
-      discovery.skipped.push(
-        ...plan.skipped.map((skip) => ({
-          name: skip.name,
-          provider,
-          reason: skip.reason,
-          scope,
-        })),
-      );
+      addScopedImportPlan(discovery, provider, scope, plan);
     }
   }
 
-  const duplicateNames = duplicateImportCandidateNames(discovery.candidates);
-  if (duplicateNames.size > 0) {
-    discovery.conflicts.push(
-      ...discovery.candidates
-        .filter((candidate) => duplicateNames.has(candidate.name))
-        .map((candidate) => ({
-          name: candidate.name,
-          provider: candidate.provider,
-          reason: "duplicate discovered skill name",
-          scope: candidate.scope,
-        })),
-    );
-    discovery.candidates = discovery.candidates.filter(
-      (candidate) => !duplicateNames.has(candidate.name),
-    );
-  }
-
-  discovery.candidates.sort((left, right) =>
-    left.provider.localeCompare(right.provider) ||
-    left.scope.localeCompare(right.scope) ||
-    left.name.localeCompare(right.name),
-  );
-  discovery.conflicts.sort(compareImportSkips);
-  discovery.skipped.sort(compareImportSkips);
+  markDuplicateImportNamesAsConflicts(discovery);
+  sortImportableSkillDiscovery(discovery);
   return discovery;
 }
 
@@ -224,7 +182,7 @@ export async function applySkillImport(
   agenticsRepoDir: string,
   catalog: Catalog,
   provider: string,
-  skills: DiscoveredSkill[],
+  skills: readonly DiscoveredSkill[],
   options: PathOptions = {},
   manifestScope: InstallScope = "global",
 ): Promise<void> {
@@ -261,7 +219,7 @@ export async function applySkillImport(
 export async function applySelectedSkillImports(
   agenticsRepoDir: string,
   catalog: Catalog,
-  skills: ImportableSkillCandidate[],
+  skills: readonly ImportableSkillCandidate[],
   options: PathOptions = {},
 ): Promise<void> {
   assertUniqueImportNames(skills);
@@ -352,19 +310,36 @@ async function createMigrationImportTransactionForTarget(
   );
 
   return {
-    applySelected: async (selectedIds, message) => {
-      const selected = selectedImportCandidates(preview, selectedIds);
-      if (selected.length === 0) {
-        return { imported: [], pushed: true };
-      }
-
-      await applySelectedSkillImports(target.dir, catalog, selected, options);
-      await target.writeCatalog(catalog);
-      const pushed = await target.pushChanges(message);
-      return { imported: selected, pushed };
-    },
+    applySelected: (selectedIds, message) =>
+      applyMigrationImportSelection(
+        target,
+        catalog,
+        preview,
+        selectedIds,
+        message,
+        options,
+      ),
     preview,
   };
+}
+
+async function applyMigrationImportSelection(
+  target: ProviderSkillImportTarget,
+  catalog: Catalog,
+  preview: ImportableSkillDiscovery,
+  selectedIds: readonly string[],
+  message: string,
+  options: PathOptions,
+): Promise<MigrationImportApplyResult> {
+  const selected = selectedImportCandidates(preview, selectedIds);
+  if (selected.length === 0) {
+    return { imported: [], pushed: true };
+  }
+
+  await applySelectedSkillImports(target.dir, catalog, selected, options);
+  await target.writeCatalog(catalog);
+  const pushed = await target.pushChanges(message);
+  return { imported: selected, pushed };
 }
 
 async function importProviderSkillsWithTransaction(
@@ -428,7 +403,72 @@ function skillRoot(
   );
 }
 
-function assertUniqueImportNames(skills: ImportableSkillCandidate[]): void {
+function addScopedImportPlan(
+  discovery: ImportableSkillDiscovery,
+  provider: string,
+  scope: InstallScope,
+  plan: ImportSkillsPlan,
+): void {
+  discovery.candidates.push(
+    ...plan.imported.map((skill) => ({
+      ...skill,
+      id: importableSkillId(provider, scope, skill.name),
+      provider,
+      scope,
+    })),
+  );
+  discovery.conflicts.push(
+    ...plan.conflicts.map((name) => ({
+      name,
+      provider,
+      reason: catalogConflictReason,
+      scope,
+    })),
+  );
+  discovery.skipped.push(
+    ...plan.skipped.map((skip) => ({
+      name: skip.name,
+      provider,
+      reason: skip.reason,
+      scope,
+    })),
+  );
+}
+
+function markDuplicateImportNamesAsConflicts(
+  discovery: ImportableSkillDiscovery,
+): void {
+  const duplicateNames = duplicateImportCandidateNames(discovery.candidates);
+  if (duplicateNames.size === 0) {
+    return;
+  }
+
+  discovery.conflicts.push(
+    ...discovery.candidates
+      .filter((candidate) => duplicateNames.has(candidate.name))
+      .map((candidate) => ({
+        name: candidate.name,
+        provider: candidate.provider,
+        reason: duplicateDiscoveredSkillReason,
+        scope: candidate.scope,
+      })),
+  );
+  discovery.candidates = discovery.candidates.filter(
+    (candidate) => !duplicateNames.has(candidate.name),
+  );
+}
+
+function sortImportableSkillDiscovery(
+  discovery: ImportableSkillDiscovery,
+): void {
+  discovery.candidates.sort(compareImportableSkillCandidates);
+  discovery.conflicts.sort(compareImportSkips);
+  discovery.skipped.sort(compareImportSkips);
+}
+
+function assertUniqueImportNames(
+  skills: readonly ImportableSkillCandidate[],
+): void {
   const duplicates = [...duplicateImportCandidateNames(skills)].sort();
   if (duplicates.length > 0) {
     throw new Error(
@@ -438,7 +478,7 @@ function assertUniqueImportNames(skills: ImportableSkillCandidate[]): void {
 }
 
 function duplicateImportCandidateNames(
-  candidates: ImportableSkillCandidate[],
+  candidates: readonly ImportableSkillCandidate[],
 ): Set<string> {
   const counts = new Map<string, number>();
   for (const candidate of candidates) {
@@ -468,6 +508,17 @@ function selectedImportCandidates(
 
     return candidate;
   });
+}
+
+function compareImportableSkillCandidates(
+  left: ImportableSkillCandidate,
+  right: ImportableSkillCandidate,
+): number {
+  return (
+    left.provider.localeCompare(right.provider) ||
+    left.scope.localeCompare(right.scope) ||
+    left.name.localeCompare(right.name)
+  );
 }
 
 function compareImportSkips(
