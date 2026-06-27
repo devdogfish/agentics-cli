@@ -24,11 +24,8 @@ import {
 import { fileURLToPath } from "node:url";
 import {
   assertSupportedConfiguredTool,
-  configPath,
   defaultSupportedTools,
-  deprecatedAgenticsRepoPath,
   loadConfig,
-  managedAgenticsRepoPath,
   saveConfig,
   type JawfishConfig,
 } from "./config.ts";
@@ -49,15 +46,12 @@ import {
 } from "./install.ts";
 import { runCommand } from "./process.ts";
 import {
-  configureAgenticsRepoGitUser,
-  ensureAgenticsRepoIgnore,
-  pushAgenticsRepoChanges,
+  openAgenticsRepoSession,
+  type AgenticsRepoSession,
 } from "./agentics-repo.ts";
 import {
   agenticTypes,
   isAgenticType,
-  readCatalog,
-  writeCatalog,
   type Catalog,
   type CatalogEntry,
 } from "./catalog.ts";
@@ -225,12 +219,12 @@ async function addCommand(args: CommandArgs): Promise<number> {
   const source = args.positionals[0]!;
 
   const config = await loadConfig({ promptForMissingDefaultTool: false });
-  const agenticsRepoDir = await resolveAgenticsRepo(config);
-  const catalog = await readCatalog(agenticsRepoDir);
+  const session = await openAgenticsRepoSession(config);
+  const catalog = await session.readCatalog();
   const scope = getScope(args);
 
   if (catalogHasAgentic(catalog, source)) {
-    const tool = await installOne(agenticsRepoDir, catalog, source, scope, config);
+    const tool = await installOne(session.dir, catalog, source, scope, config);
     console.log(`Added ${source} to ${scope}`);
     printCatalogEntry(source, catalog.jawfish[source], tool);
     return 0;
@@ -243,7 +237,7 @@ async function addCommand(args: CommandArgs): Promise<number> {
   const repoSource = await acquireRepoSource(source);
   if (repoSource !== undefined && shouldScanRepoSkills(repoSource, config)) {
     const result = await importAndInstallRepoSkills(
-      agenticsRepoDir,
+      session,
       catalog,
       repoSource,
       args,
@@ -263,24 +257,24 @@ async function addCommand(args: CommandArgs): Promise<number> {
     return 0;
   }
 
-  const imported = await importPackage(agenticsRepoDir, catalog, source, args.name);
+  const imported = await importPackage(session.dir, catalog, source, args.name);
   if (imported.imported) {
-    await writeCatalog(agenticsRepoDir, catalog);
-    if (!(await pushAgenticsRepoChanges(agenticsRepoDir, `add ${imported.name}`))) {
+    await session.writeCatalog(catalog);
+    if (!(await session.pushChanges(`add ${imported.name}`))) {
       return 1;
     }
   }
 
-  await installOne(agenticsRepoDir, catalog, imported.name, scope, config);
+  await installOne(session.dir, catalog, imported.name, scope, config);
   console.log(`Added ${imported.name} to ${scope}`);
   return 0;
 }
 
 async function installCommand(args: CommandArgs): Promise<number> {
   const config = await loadConfig({ promptForMissingDefaultTool: false });
-  const agenticsRepoDir = await resolveAgenticsRepo(config);
-  await syncAgenticsRepo(agenticsRepoDir);
-  const catalog = await readCatalog(agenticsRepoDir);
+  const session = await openAgenticsRepoSession(config);
+  await session.sync();
+  const catalog = await session.readCatalog();
   const scope = getScope(args);
   const manifest = await readManifest(scope);
   const installPlan = Object.entries(manifest.jawfish).map(([name, entry]) => {
@@ -294,7 +288,7 @@ async function installCommand(args: CommandArgs): Promise<number> {
   });
 
   for (const { name, tool } of installPlan) {
-    await materialize(agenticsRepoDir, catalog, name, scope, tool);
+    await materialize(session.dir, catalog, name, scope, tool);
   }
 
   console.log(`Installed ${installPlan.length} jawfish to ${scope}`);
@@ -306,15 +300,15 @@ async function listCommand(args: CommandArgs): Promise<number> {
   const installed = args.installed;
 
   const config = await loadConfig({ promptForMissingDefaultTool: false });
-  const agenticsRepoDir = await resolveAgenticsRepo(config);
-  await syncAgenticsRepo(agenticsRepoDir);
-  const catalog = await readCatalog(agenticsRepoDir);
+  const session = await openAgenticsRepoSession(config);
+  await session.sync();
+  const catalog = await session.readCatalog();
   const [projectManifest, globalManifest] = await Promise.all([
     readManifest("project"),
     readManifest("global"),
   ]);
   const entries = catalogEntriesForList(
-    agenticsRepoDir,
+    session.dir,
     catalog,
     type,
     projectManifest,
@@ -340,8 +334,8 @@ async function importSkillsCommand(args: CommandArgs): Promise<number> {
   assertSupportedConfiguredTool(provider, "provider");
 
   const config = await loadConfig({ promptForMissingDefaultTool: false });
-  const agenticsRepoDir = await resolveAgenticsRepo(config);
-  const catalog = await readCatalog(agenticsRepoDir);
+  const session = await openAgenticsRepoSession(config);
+  const catalog = await session.readCatalog();
   const sourceRoot = globalSkillRoot(provider);
   const plan = await planSkillImport(sourceRoot, catalog);
 
@@ -361,9 +355,9 @@ async function importSkillsCommand(args: CommandArgs): Promise<number> {
     return 0;
   }
 
-  await applySkillImport(agenticsRepoDir, catalog, provider, selected);
-  await writeCatalog(agenticsRepoDir, catalog);
-  if (!(await pushAgenticsRepoChanges(agenticsRepoDir, `import skills from ${provider}`))) {
+  await applySkillImport(session.dir, catalog, provider, selected);
+  await session.writeCatalog(catalog);
+  if (!(await session.pushChanges(`import skills from ${provider}`))) {
     return 1;
   }
 
@@ -388,8 +382,8 @@ async function removeCommand(args: CommandArgs): Promise<number> {
   const name = args.positionals[0]!;
 
   const config = await loadConfig({ promptForMissingDefaultTool: false });
-  const agenticsRepoDir = await resolveAgenticsRepo(config);
-  const catalog = await readCatalog(agenticsRepoDir);
+  const session = await openAgenticsRepoSession(config);
+  const catalog = await session.readCatalog();
   const scope = getScope(args);
   const manifest = await readManifest(scope);
   const manifestEntry = manifest.jawfish[name];
@@ -421,26 +415,27 @@ async function removeCommand(args: CommandArgs): Promise<number> {
 
 async function updateCommand(args: CommandArgs): Promise<number> {
   const config = await loadConfig({ promptForMissingDefaultTool: false });
-  const agenticsRepoDir = await resolveAgenticsRepo(config);
-  const catalog = await readCatalog(agenticsRepoDir);
+  const session = await openAgenticsRepoSession(config);
+  await session.sync();
+  const catalog = await session.readCatalog();
   const name = args.positionals[0];
   const reinstallScope = getScope(args);
 
   if (name !== undefined) {
     await updatePackageInAgenticsRepo(
-      agenticsRepoDir,
+      session.dir,
       catalog,
       name,
       args.force,
       reinstallScope,
     );
-    await writeCatalog(agenticsRepoDir, catalog);
-    if (!(await pushAgenticsRepoChanges(agenticsRepoDir, `update ${name}`))) {
+    await session.writeCatalog(catalog);
+    if (!(await session.pushChanges(`update ${name}`))) {
       return 1;
     }
 
     await reinstallInScopeIfPresent(
-      agenticsRepoDir,
+      session.dir,
       catalog,
       name,
       reinstallScope,
@@ -450,15 +445,15 @@ async function updateCommand(args: CommandArgs): Promise<number> {
   }
 
   const summary = await updateAllPackages(
-    agenticsRepoDir,
+    session.dir,
     catalog,
     args.force,
     reinstallScope,
   );
 
   if (summary.failed.length === 0 && summary.updated.length > 0) {
-    await writeCatalog(agenticsRepoDir, catalog);
-    if (!(await pushAgenticsRepoChanges(agenticsRepoDir, "update jawfish"))) {
+    await session.writeCatalog(catalog);
+    if (!(await session.pushChanges("update jawfish"))) {
       printBulkUpdateSummary(summary);
       return 1;
     }
@@ -466,7 +461,7 @@ async function updateCommand(args: CommandArgs): Promise<number> {
     await Promise.all(
       summary.updated.map((updatedName) =>
         reinstallInScopeIfPresent(
-          agenticsRepoDir,
+          session.dir,
           catalog,
           updatedName,
           reinstallScope,
@@ -533,7 +528,7 @@ async function importPackage(
 }
 
 async function importAndInstallRepoSkills(
-  agenticsRepoDir: string,
+  session: AgenticsRepoSession,
   catalog: Catalog,
   repoSource: RepoSource,
   args: CommandArgs,
@@ -564,7 +559,7 @@ async function importAndInstallRepoSkills(
   let importedCount = 0;
   for (const candidate of selectedCandidates) {
     const imported = await importRepoSkillCandidate(
-      agenticsRepoDir,
+      session.dir,
       catalog,
       candidate,
       args.name,
@@ -577,15 +572,15 @@ async function importAndInstallRepoSkills(
   }
 
   if (importedCount > 0) {
-    await writeCatalog(agenticsRepoDir, catalog);
+    await session.writeCatalog(catalog);
     const names = selections.map((selection) => selection.name).join(", ");
-    if (!(await pushAgenticsRepoChanges(agenticsRepoDir, `add ${names}`))) {
+    if (!(await session.pushChanges(`add ${names}`))) {
       return { selected: [], unselectedSiblingCount: 0 };
     }
   }
 
   for (const selection of selections) {
-    await installOne(agenticsRepoDir, catalog, selection.name, scope, config);
+    await installOne(session.dir, catalog, selection.name, scope, config);
   }
 
   return {
@@ -1556,97 +1551,6 @@ async function resolveTool(config: JawfishConfig): Promise<string> {
   return selected;
 }
 
-async function resolveAgenticsRepo(config: JawfishConfig): Promise<string> {
-  if (config.agenticsRepo === undefined || config.agenticsRepo === "") {
-    const agenticsRepoDir = managedAgenticsRepoPath();
-    await initializeLocalManagedAgenticsRepo(agenticsRepoDir);
-    config.agenticsRepo = agenticsRepoDir;
-    await saveConfig(config);
-    return agenticsRepoDir;
-  }
-
-  const configured = isAbsolute(config.agenticsRepo)
-    ? config.agenticsRepo
-    : resolve(process.cwd(), config.agenticsRepo);
-
-  if (resolve(configured) === resolve(deprecatedAgenticsRepoPath())) {
-    throw new Error(
-      `Nested agentics repo is no longer supported: ${configured}\n` +
-        `Move the repo to ${managedAgenticsRepoPath()} and update ${configPath()}.`,
-    );
-  }
-
-  if ((await exists(configured)) && !(await isBareRepository(configured))) {
-    await ensureAgenticsRepoIgnore(configured);
-    return configured;
-  }
-
-  const agenticsRepoDir = managedAgenticsRepoPath();
-  if (await exists(join(agenticsRepoDir, ".git"))) {
-    await configureAgenticsRepoGitUser(agenticsRepoDir);
-    await ensureAgenticsRepoIgnore(agenticsRepoDir);
-    return agenticsRepoDir;
-  }
-
-  await initializeManagedAgenticsRepo(config.agenticsRepo, agenticsRepoDir);
-  await ensureAgenticsRepoIgnore(agenticsRepoDir);
-  return agenticsRepoDir;
-}
-
-async function initializeLocalManagedAgenticsRepo(agenticsRepoDir: string): Promise<void> {
-  await mkdir(agenticsRepoDir, { recursive: true });
-  if (!(await exists(join(agenticsRepoDir, ".git")))) {
-    await runCommand("git", ["init"], agenticsRepoDir);
-  }
-
-  await configureAgenticsRepoGitUser(agenticsRepoDir);
-  await ensureAgenticsRepoIgnore(agenticsRepoDir);
-}
-
-async function initializeManagedAgenticsRepo(
-  source: string,
-  agenticsRepoDir: string,
-): Promise<void> {
-  await mkdir(agenticsRepoDir, { recursive: true });
-  await runCommand("git", ["init"], agenticsRepoDir);
-  await configureAgenticsRepoGitUser(agenticsRepoDir);
-  await runCommand("git", ["remote", "add", "origin", source], agenticsRepoDir);
-  await runCommand("git", ["fetch", "origin"], agenticsRepoDir);
-
-  const branch = await remoteDefaultBranch(agenticsRepoDir);
-  if (branch === undefined) {
-    await runCommand("git", ["checkout", "-B", "main"], agenticsRepoDir);
-    return;
-  }
-
-  await runCommand(
-    "git",
-    ["checkout", "-B", branch, `origin/${branch}`],
-    agenticsRepoDir,
-  );
-  await runCommand(
-    "git",
-    ["branch", "--set-upstream-to", `origin/${branch}`, branch],
-    agenticsRepoDir,
-  );
-}
-
-async function remoteDefaultBranch(
-  agenticsRepoDir: string,
-): Promise<string | undefined> {
-  const result = await runCommand(
-    "git",
-    ["ls-remote", "--symref", "origin", "HEAD"],
-    agenticsRepoDir,
-  );
-  const match = /^ref: refs\/heads\/([^\t]+)\tHEAD$/mu.exec(result.stdout);
-  if (match === null) {
-    return undefined;
-  }
-
-  return match[1];
-}
-
 function printCatalogEntry(
   name: string,
   entry: CatalogEntry | undefined,
@@ -1853,35 +1757,6 @@ function inferPackageName(packagePath: string): string {
 
 function getScope(args: CommandArgs): InstallScope {
   return args.global ? "global" : "project";
-}
-
-async function isBareRepository(path: string): Promise<boolean> {
-  const result = await runCommand(
-    "git",
-    ["rev-parse", "--is-bare-repository"],
-    path,
-    false,
-  );
-
-  return result.exitCode === 0 && result.stdout.trim() === "true";
-}
-
-async function syncAgenticsRepo(agenticsRepoDir: string): Promise<void> {
-  if (!(await exists(join(agenticsRepoDir, ".git")))) {
-    return;
-  }
-
-  const upstream = await runCommand(
-    "git",
-    ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
-    agenticsRepoDir,
-    false,
-  );
-  if (upstream.exitCode !== 0) {
-    return;
-  }
-
-  await runCommand("git", ["pull", "--ff-only"], agenticsRepoDir);
 }
 
 async function dirtyPaths(

@@ -11,7 +11,10 @@ import {
   writeJson,
   writeManifest,
 } from "./install.ts";
-import { pushAgenticsRepoChanges } from "./agentics-repo.ts";
+import {
+  pushAgenticsRepoChanges,
+  type AgenticsRepoSession,
+} from "./agentics-repo.ts";
 import { toolPaths } from "./config.ts";
 import {
   destinationSpec,
@@ -51,6 +54,12 @@ export interface ImportSkillsPlan {
 export interface ImportSkillsSkip {
   name: string;
   reason: string;
+}
+
+interface ProviderSkillImportTarget {
+  dir: string;
+  pushChanges: (message: string) => Promise<boolean>;
+  writeCatalog: (catalog: Catalog) => Promise<void>;
 }
 
 export async function planSkillImport(
@@ -217,6 +226,34 @@ export async function importProviderSkills(
   provider: string,
   options: PathOptions = {},
 ): Promise<number> {
+  return await importProviderSkillsToTarget(
+    {
+      dir: agenticsRepoDir,
+      pushChanges: (message) =>
+        pushAgenticsRepoChanges(agenticsRepoDir, message),
+      writeCatalog: (catalog) => writeCatalog(agenticsRepoDir, catalog),
+    },
+    catalog,
+    provider,
+    options,
+  );
+}
+
+export async function importProviderSkillsToSession(
+  session: AgenticsRepoSession,
+  provider: string,
+  options: PathOptions = {},
+): Promise<number> {
+  const catalog = await session.readCatalog();
+  return await importProviderSkillsToTarget(session, catalog, provider, options);
+}
+
+async function importProviderSkillsToTarget(
+  target: ProviderSkillImportTarget,
+  catalog: Catalog,
+  provider: string,
+  options: PathOptions,
+): Promise<number> {
   const sourceRoot = globalSkillRoot(provider, options);
   const plan = await planSkillImport(sourceRoot, catalog);
 
@@ -227,9 +264,9 @@ export async function importProviderSkills(
     return 0;
   }
 
-  await applySkillImport(agenticsRepoDir, catalog, provider, plan.imported, options);
-  await writeCatalog(agenticsRepoDir, catalog);
-  if (!(await pushAgenticsRepoChanges(agenticsRepoDir, `import skills from ${provider}`))) {
+  await applySkillImport(target.dir, catalog, provider, plan.imported, options);
+  await target.writeCatalog(catalog);
+  if (!(await target.pushChanges(`import skills from ${provider}`))) {
     return 1;
   }
 

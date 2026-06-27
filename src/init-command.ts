@@ -1,19 +1,22 @@
 import { cancel, isCancel, multiselect, select, text } from "@clack/prompts";
-import { mkdir } from "node:fs/promises";
-import { isAbsolute, join, resolve } from "node:path";
+import { join } from "node:path";
 import {
-  configureAgenticsRepoGitUser,
-  ensureAgenticsRepoIgnore,
-  inspectAgenticsRepo,
-  pushAgenticsRepoChanges,
+  agenticsRepoOriginRemote,
+  assertAgenticsRepoPathSupported,
+  createAgenticsRepoSession,
+  inspectionAgenticsRepoDir,
+  isBareAgenticsRepo,
+  looksLikeAgenticsRepoRemote,
+  prepareAgenticsRepoSelection,
   type AgenticsRepoInspection,
+  type AgenticsRepoSelection,
+  type AgenticsRepoSession,
 } from "./agentics-repo.ts";
-import { readCatalog, writeCatalog, type Catalog } from "./catalog.ts";
+import { type Catalog } from "./catalog.ts";
 import {
   assertSupportedConfiguredTool,
   configPath,
   defaultSupportedTools,
-  deprecatedAgenticsRepoPath,
   existingConfigPath,
   jawfishHome,
   loadConfig,
@@ -32,10 +35,9 @@ import {
 import {
   applySelectedSkillImports,
   discoverImportableSkills,
-  importProviderSkills,
+  importProviderSkillsToSession,
   type ImportableSkillCandidate,
 } from "./provider-skill-import.ts";
-import { runCommand } from "./process.ts";
 
 interface InitCommandArgs {
   yes: boolean;
@@ -43,7 +45,6 @@ interface InitCommandArgs {
 
 type AgenticsRepoMode = "link" | "local";
 type ExistingMachineInitAction = "project" | "reinitialize";
-type GitRepositoryState = "created" | "existing";
 type MachineReinitializeAction =
   | "agentics"
   | "agentics-repo"
@@ -93,12 +94,6 @@ interface InitContext {
   cwd: string;
   env: NodeJS.ProcessEnv;
   prompts: InitCommandPrompts;
-}
-
-interface AgenticsRepoSelection {
-  createIfMissing: boolean;
-  localPath: string;
-  remoteSource?: string;
 }
 
 export async function initCommand(
@@ -152,6 +147,12 @@ function initContext(options: InitCommandOptions): InitContext {
     env: options.env ?? process.env,
     prompts: options.prompts ?? defaultInitPrompts,
   };
+}
+
+function pathOptions(
+  context: InitContext,
+): { cwd: string; env: NodeJS.ProcessEnv } {
+  return { cwd: context.cwd, env: context.env };
 }
 
 const defaultInitPrompts: InitCommandPrompts = {
@@ -226,7 +227,10 @@ async function resolveAgenticsRepoSelection(
   }
 
   const selected = await context.prompts.inputAgenticsRepo();
-  if (looksLikeGitUrl(selected) || (await isBareRepository(selected))) {
+  if (
+    looksLikeAgenticsRepoRemote(selected) ||
+    (await isBareAgenticsRepo(selected))
+  ) {
     return {
       createIfMissing: true,
       localPath: await inputAgenticsRepoLocalPath(context, defaultLocalPath),
@@ -252,7 +256,10 @@ async function noninteractiveAgenticsRepoSelection(
     };
   }
 
-  if (looksLikeGitUrl(configured) || (await isBareRepository(configured))) {
+  if (
+    looksLikeAgenticsRepoRemote(configured) ||
+    (await isBareAgenticsRepo(configured))
+  ) {
     return {
       createIfMissing: true,
       localPath: managedAgenticsRepoPath(context.env),
@@ -296,114 +303,7 @@ async function prepareAgenticsRepo(
   selection: AgenticsRepoSelection,
   context: InitContext,
 ): Promise<void> {
-  if (selection.remoteSource === undefined) {
-    const linkedPath = resolveConfiguredPath(selection.localPath, context.cwd);
-    const linkedPathExists = await exists(linkedPath);
-    if (!linkedPathExists && !selection.createIfMissing) {
-      throw new Error(`Agentics repo path not found: ${selection.localPath}`);
-    }
-
-    await initializeLocalAgenticsRepo(selection.localPath, context);
-    return;
-  }
-
-  const localPath = resolveConfiguredPath(selection.localPath, context.cwd);
-  await mkdir(localPath, { recursive: true });
-  await initializeManagedAgenticsRepo(selection.remoteSource, localPath);
-}
-
-async function initializeLocalAgenticsRepo(
-  agenticsRepo: string,
-  context: InitContext,
-): Promise<void> {
-  const agenticsRepoDir = resolveConfiguredPath(agenticsRepo, context.cwd);
-
-  await ensureGitRepository(agenticsRepoDir);
-  await ensureAgenticsRepoIgnore(agenticsRepoDir);
-}
-
-async function initializeManagedAgenticsRepo(
-  source: string,
-  agenticsRepoDir: string,
-): Promise<void> {
-  await ensureGitRepository(agenticsRepoDir);
-  await configureOriginRemote(source, agenticsRepoDir);
-
-  await runCommand("git", ["fetch", "origin"], agenticsRepoDir);
-
-  const branch = await remoteDefaultBranch(agenticsRepoDir);
-  if (branch === undefined) {
-    await runCommand("git", ["checkout", "-B", "main"], agenticsRepoDir);
-    await ensureAgenticsRepoIgnore(agenticsRepoDir);
-    return;
-  }
-
-  await runCommand(
-    "git",
-    ["checkout", "-B", branch, `origin/${branch}`],
-    agenticsRepoDir,
-  );
-  await runCommand(
-    "git",
-    ["branch", "--set-upstream-to", `origin/${branch}`, branch],
-    agenticsRepoDir,
-  );
-  await ensureAgenticsRepoIgnore(agenticsRepoDir);
-}
-
-async function configureOriginRemote(
-  source: string,
-  agenticsRepoDir: string,
-): Promise<void> {
-  if ((await originRemote(agenticsRepoDir)) === undefined) {
-    await runCommand("git", ["remote", "add", "origin", source], agenticsRepoDir);
-    return;
-  }
-
-  await runCommand("git", ["remote", "set-url", "origin", source], agenticsRepoDir);
-}
-
-async function ensureGitRepository(
-  agenticsRepoDir: string,
-): Promise<GitRepositoryState> {
-  await mkdir(agenticsRepoDir, { recursive: true });
-  const hadGitRepository = await exists(join(agenticsRepoDir, ".git"));
-  if (!hadGitRepository) {
-    await runCommand("git", ["init"], agenticsRepoDir);
-  }
-
-  await configureAgenticsRepoGitUser(agenticsRepoDir);
-  return hadGitRepository ? "existing" : "created";
-}
-
-async function remoteDefaultBranch(
-  agenticsRepoDir: string,
-): Promise<string | undefined> {
-  const result = await runCommand(
-    "git",
-    ["ls-remote", "--symref", "origin", "HEAD"],
-    agenticsRepoDir,
-  );
-  const match = /^ref: refs\/heads\/([^\t]+)\tHEAD$/mu.exec(result.stdout);
-  if (match === null) {
-    return undefined;
-  }
-
-  return match[1];
-}
-
-async function isBareRepository(path: string): Promise<boolean> {
-  if (!(await exists(path))) {
-    return false;
-  }
-
-  const result = await runCommand(
-    "git",
-    ["rev-parse", "--is-bare-repository"],
-    path,
-    false,
-  );
-  return result.exitCode === 0 && result.stdout.trim() === "true";
+  await prepareAgenticsRepoSelection(selection, pathOptions(context));
 }
 
 async function ensureGlobalManifest(context: InitContext): Promise<void> {
@@ -423,16 +323,8 @@ async function validateMachineSetup(context: InitContext): Promise<JawfishConfig
     return config;
   }
 
-  const configured = resolveConfiguredPath(config.agenticsRepo, context.cwd);
-  if (resolve(configured) !== resolve(deprecatedAgenticsRepoPath(context.env))) {
-    return config;
-  }
-
-  throw new Error(
-    `Nested agentics repo is no longer supported: ${configured}\n` +
-      `Move the repo to ${managedAgenticsRepoPath(context.env)} and update ` +
-      `${configPath(jawfishHome(context.env))}.`,
-  );
+  assertAgenticsRepoPathSupported(config.agenticsRepo, pathOptions(context));
+  return config;
 }
 
 async function ensureManifest(path: string): Promise<void> {
@@ -565,9 +457,9 @@ async function runImportAndStarterEdit(
   config: JawfishConfig,
   context: InitContext,
 ): Promise<void> {
-  const agenticsRepoDir = await configuredAgenticsRepoDir(config, context);
-  await importSelectedSkills(agenticsRepoDir, context);
-  const inspection = await inspectAgenticsRepo(agenticsRepoDir);
+  const session = await configuredAgenticsRepoSession(config, context);
+  await importSelectedSkills(session, context);
+  const inspection = await session.inspect();
 
   printInspection(inspection);
   if (inspection.usable.length === 0) {
@@ -577,7 +469,7 @@ async function runImportAndStarterEdit(
 
   await installSelectedGlobalStarters(
     config,
-    agenticsRepoDir,
+    session.dir,
     inspection,
     context,
   );
@@ -587,40 +479,40 @@ async function runMachineStarterSetup(
   config: JawfishConfig,
   context: InitContext,
 ): Promise<void> {
-  const agenticsRepoDir = await configuredAgenticsRepoDir(config, context);
-  let inspection = await inspectAgenticsRepo(agenticsRepoDir);
+  const session = await configuredAgenticsRepoSession(config, context);
+  let inspection = await session.inspect();
 
   printInspection(inspection);
 
   const shouldImportBeforeStarterSelection = inspection.usable.length === 0;
   if (shouldImportBeforeStarterSelection) {
-    await importSelectedSkills(agenticsRepoDir, context);
-    inspection = await inspectAgenticsRepo(agenticsRepoDir);
+    await importSelectedSkills(session, context);
+    inspection = await session.inspect();
     if (inspection.usable.length > 0) {
       printInspection(inspection);
     }
   }
 
   if (inspection.usable.length > 0) {
-    await installSelectedGlobalStarters(config, agenticsRepoDir, inspection, context);
+    await installSelectedGlobalStarters(config, session.dir, inspection, context);
   }
 
   if (!shouldImportBeforeStarterSelection) {
-    await importSelectedSkills(agenticsRepoDir, context);
+    await importSelectedSkills(session, context);
   }
 }
 
 async function importSelectedSkills(
-  agenticsRepoDir: string,
+  session: AgenticsRepoSession,
   context: InitContext,
 ): Promise<void> {
-  const pathOptions = { cwd: context.cwd, env: context.env };
-  const catalog = await readCatalog(agenticsRepoDir);
+  const options = pathOptions(context);
+  const catalog = await session.readCatalog();
   const discovery = await discoverImportableSkills(
     defaultSupportedTools,
     ["global", "project"],
     catalog,
-    pathOptions,
+    options,
   );
 
   if (discovery.candidates.length === 0) {
@@ -629,7 +521,7 @@ async function importSelectedSkills(
   }
 
   if (context.prompts.selectImportSkills === undefined) {
-    await importSelectedProviders(agenticsRepoDir, context);
+    await importSelectedProviders(session, context);
     return;
   }
 
@@ -652,16 +544,16 @@ async function importSelectedSkills(
     return;
   }
 
-  await applySelectedSkillImports(agenticsRepoDir, catalog, selected, pathOptions);
-  await writeCatalog(agenticsRepoDir, catalog);
-  if (!(await pushAgenticsRepoChanges(agenticsRepoDir, "import skills"))) {
+  await applySelectedSkillImports(session.dir, catalog, selected, options);
+  await session.writeCatalog(catalog);
+  if (!(await session.pushChanges("import skills"))) {
     throw new Error("Import failed");
   }
   console.log(`Imported ${selected.length} skills`);
 }
 
 async function importSelectedProviders(
-  agenticsRepoDir: string,
+  session: AgenticsRepoSession,
   context: InitContext,
 ): Promise<void> {
   const prompt = context.prompts.selectImportProviders;
@@ -672,14 +564,12 @@ async function importSelectedProviders(
   const selectedProviderNames = await prompt(defaultSupportedTools);
   assertSelectedImportProvidersSupported(selectedProviderNames);
 
-  const pathOptions = { cwd: context.cwd, env: context.env };
+  const options = pathOptions(context);
   for (const provider of selectedProviderNames) {
-    const catalog = await readCatalog(agenticsRepoDir);
-    const result = await importProviderSkills(
-      agenticsRepoDir,
-      catalog,
+    const result = await importProviderSkillsToSession(
+      session,
       provider,
-      pathOptions,
+      options,
     );
     if (result !== 0) {
       throw new Error(`Import failed for ${provider}`);
@@ -693,8 +583,8 @@ async function installSelectedGlobalStarters(
   inspection: AgenticsRepoInspection,
   context: InitContext,
 ): Promise<void> {
-  const pathOptions = { cwd: context.cwd, env: context.env };
-  const manifest = await readManifest("global", pathOptions);
+  const options = pathOptions(context);
+  const manifest = await readManifest("global", options);
   const selected = await selectGlobalStarterAgentics(context, inspection, manifest);
   if (selected.length === 0) {
     console.log("No global starter agentics selected");
@@ -712,7 +602,7 @@ async function installSelectedGlobalStarters(
       name,
       "global",
       tool,
-      pathOptions,
+      options,
     );
     console.log(`Installed ${name} globally`);
   }
@@ -735,10 +625,10 @@ async function runProjectSetup(
   config: JawfishConfig,
   context: InitContext,
 ): Promise<void> {
-  const agenticsRepoDir = await configuredAgenticsRepoDir(config, context);
-  const inspection = await inspectAgenticsRepo(agenticsRepoDir);
-  const pathOptions = { cwd: context.cwd, env: context.env };
-  const manifest = await readManifest("project", pathOptions);
+  const session = await configuredAgenticsRepoSession(config, context);
+  const inspection = await session.inspect();
+  const options = pathOptions(context);
+  const manifest = await readManifest("project", options);
 
   console.log(
     `Initialized project at ${manifestPath("project", context.env, context.cwd)}`,
@@ -764,12 +654,12 @@ async function runProjectSetup(
   const catalog = catalogFromInspection(inspection);
   for (const name of selected) {
     await installManifestEntry(
-      agenticsRepoDir,
+      session.dir,
       catalog,
       name,
       "project",
       tool,
-      pathOptions,
+      options,
     );
     console.log(`Installed ${name} to project`);
   }
@@ -973,7 +863,16 @@ async function configuredAgenticsRepoDir(
   context: InitContext,
 ): Promise<string> {
   const agenticsRepo = configuredAgenticsRepo(config, context);
-  return await inspectionAgenticsRepoDir(agenticsRepo, context);
+  return await inspectionAgenticsRepoDir(agenticsRepo, pathOptions(context));
+}
+
+async function configuredAgenticsRepoSession(
+  config: JawfishConfig,
+  context: InitContext,
+): Promise<AgenticsRepoSession> {
+  return createAgenticsRepoSession(
+    await configuredAgenticsRepoDir(config, context),
+  );
 }
 
 async function printAgenticsRepoInspection(
@@ -988,52 +887,26 @@ async function printAgenticsRepoInspection(
     return;
   }
 
-  const agenticsRepoDir = await inspectionAgenticsRepoDir(agenticsRepo, context);
-  const inspection = await inspectAgenticsRepo(agenticsRepoDir);
-  printInspection(inspection);
+  const session = createAgenticsRepoSession(
+    await inspectionAgenticsRepoDir(agenticsRepo, pathOptions(context)),
+  );
+  printInspection(await session.inspect());
 }
 
 async function printAgenticsRepoLocation(
   agenticsRepo: string,
   context: InitContext,
 ): Promise<void> {
-  const agenticsRepoDir = await inspectionAgenticsRepoDir(agenticsRepo, context);
+  const agenticsRepoDir = await inspectionAgenticsRepoDir(
+    agenticsRepo,
+    pathOptions(context),
+  );
   console.log(`Agentics repo local: ${agenticsRepoDir}`);
 
-  const remote = await originRemote(agenticsRepoDir);
+  const remote = await agenticsRepoOriginRemote(agenticsRepoDir);
   if (remote !== undefined) {
     console.log(`Agentics repo remote: ${remote}`);
   }
-}
-
-async function originRemote(agenticsRepoDir: string): Promise<string | undefined> {
-  if (!(await exists(join(agenticsRepoDir, ".git")))) {
-    return undefined;
-  }
-
-  const result = await runCommand(
-    "git",
-    ["remote", "get-url", "origin"],
-    agenticsRepoDir,
-    false,
-  );
-  if (result.exitCode !== 0 || result.stdout.trim() === "") {
-    return undefined;
-  }
-
-  return result.stdout.trim();
-}
-
-async function inspectionAgenticsRepoDir(
-  agenticsRepo: string,
-  context: InitContext,
-): Promise<string> {
-  const configured = resolveConfiguredPath(agenticsRepo, context.cwd);
-  if ((await exists(configured)) && !(await isBareRepository(configured))) {
-    return configured;
-  }
-
-  return managedAgenticsRepoPath(context.env);
 }
 
 function printInspection(inspection: AgenticsRepoInspection): void {
@@ -1072,14 +945,6 @@ function formatNames(names: string[]): string {
   }
 
   return names.join(", ");
-}
-
-function resolveConfiguredPath(path: string, cwd: string): string {
-  return isAbsolute(path) ? path : resolve(cwd, path);
-}
-
-function looksLikeGitUrl(value: string): boolean {
-  return /^[a-z][a-z0-9+.-]*:\/\//i.test(value) || /^[^@\s]+@[^:\s]+:.+/.test(value);
 }
 
 async function promptForDefaultTool(tools: readonly string[]): Promise<string> {
